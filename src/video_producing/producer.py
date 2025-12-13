@@ -20,19 +20,6 @@ class CameraProducer:
         """
         self.config = config
         
-        self.logger = logging.getLogger(f'CameraProducer.{self.config.camera_id}')
-        if not self.logger.handlers:
-            handler = logging.StreamHandler()
-            formatter = logging.Formatter(
-                '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-            )
-            file_handler = logging.FileHandler("project.log", encoding="utf-8")
-            file_handler.setFormatter(formatter)
-            file_handler.setLevel(logging.INFO)
-            handler.setFormatter(formatter)
-            self.logger.addHandler(handler)
-            self.logger.setLevel(logging.INFO)
-        
         self.producer_conf = {
             'bootstrap.servers': self.config.kafka_servers,
             'message.max.bytes': self.config.max_message_size,
@@ -56,20 +43,20 @@ class CameraProducer:
         self.start_time: Optional[float] = None
         self.last_frame_time: Optional[float] = None
         
-        self.logger.info(f"Initialized for partition {self.config.partition} "
+        logging.info(f"Initialized for partition {self.config.partition} "
                         f"(total partitions: {self.config.total_partitions})")
 
     def start(self) -> None:
         """Запуск передачи кадров"""
         if self.is_running:
-            self.logger.warning("Producer is already running")
+            logging.warning("Producer is already running")
             return
             
         self.is_running = True
         self.thread = threading.Thread(target=self._capture_and_send)
         self.thread.daemon = True
         self.thread.start()
-        self.logger.info("Started video streaming")
+        logging.info("Started video streaming")
 
     def stop(self) -> None:
         """
@@ -79,7 +66,7 @@ class CameraProducer:
             return
             
         self.is_running = False
-        self.logger.info("Stopping video streaming...")
+        logging.info("Stopping video streaming...")
         
         if self.cap:
             self.cap.release()
@@ -88,19 +75,19 @@ class CameraProducer:
         if self.thread and self.thread.is_alive():
             self.thread.join(timeout=10.0)
             if self.thread.is_alive():
-                self.logger.warning("Thread did not stop gracefully")
+                logging.warning("Thread did not stop gracefully")
         
         try:
             messages_remaining = self.producer.flush(timeout=5)
             if messages_remaining > 0:
-                self.logger.warning(f"{messages_remaining} messages were not delivered")
+                logging.warning(f"{messages_remaining} messages were not delivered")
         except Exception as e:
-            self.logger.error(f"Flush failed: {e}")
+            logging.error(f"Flush failed: {e}")
         
         if self.start_time:
             duration = time.time() - self.start_time
             fps = self.frame_count / duration if duration > 0 else 0
-            self.logger.info(
+            logging.info(
                 f"Streaming stopped. Sent {self.frame_count} frames "
                 f"in {duration:.1f}s ({fps:.1f} FPS), errors: {self.error_count}"
             )
@@ -121,7 +108,7 @@ class CameraProducer:
                     if self.cap is None or not self.cap.isOpened():
                         consecutive_failures += 1
                         if consecutive_failures >= max_consecutive_failures:
-                            self.logger.error("Max consecutive failures reached, stopping")
+                            logging.error("Max consecutive failures reached, stopping")
                             break
                         time.sleep(self.reconnect_timeout)
                         continue
@@ -131,14 +118,14 @@ class CameraProducer:
                 self._process_capture_loop()
                 
             except Exception as e:
-                self.logger.error(f"Unexpected error in capture loop: {e}")
+                logging.error(f"Unexpected error in capture loop: {e}")
                 consecutive_failures += 1
                 if self.cap:
                     self.cap.release()
                     self.cap = None
                 
                 if consecutive_failures >= max_consecutive_failures:
-                    self.logger.error("Max consecutive failures reached, stopping")
+                    logging.error("Max consecutive failures reached, stopping")
                     break
                     
                 time.sleep(self.config.reconnect_timeout)
@@ -155,10 +142,10 @@ class CameraProducer:
                 raise Exception(f"Failed to open video source: {self.config.source}")
                 
             self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 2)
-            self.logger.info(f"Successfully connected to video source: {self.config.source}")
+            logging.info(f"Successfully connected to video source: {self.config.source}")
             
         except Exception as e:
-            self.logger.error(f"Failed to initialize capture: {e}")
+            logging.error(f"Failed to initialize capture: {e}")
             if self.cap:
                 self.cap.release()
                 self.cap = None
@@ -175,7 +162,7 @@ class CameraProducer:
             try:
                 ret, frame = self.cap.read()
                 if not ret:
-                    self.logger.warning("Failed to read frame, reinitializing capture")
+                    logging.warning("Failed to read frame, reinitializing capture")
                     break
                 
                 self._process_frame(frame)
@@ -183,7 +170,7 @@ class CameraProducer:
                 self.last_frame_time = time.time()
                 
             except Exception as e:
-                self.logger.error(f"Error processing frame: {e}")
+                logging.error(f"Error processing frame: {e}")
                 self.error_count += 1
                 break
             
@@ -209,11 +196,11 @@ class CameraProducer:
             )
             
             if not success:
-                self.logger.warning("Failed to encode frame as JPEG")
+                logging.warning("Failed to encode frame as JPEG")
                 return
             
             if len(jpeg_data) > self.config.max_message_size:
-                self.logger.warning(
+                logging.warning(
                     f"Frame too large: {len(jpeg_data)} bytes. "
                     f"Max allowed: {self.config.max_message_size}"
                 )
@@ -225,7 +212,7 @@ class CameraProducer:
             self._send_to_kafka(message_json)
             
         except Exception as e:
-            self.logger.error(f"Error in frame processing: {e}")
+            logging.error(f"Error in frame processing: {e}")
             self.error_count += 1
 
     def _resize_frame(self, frame: np.ndarray) -> np.ndarray:
@@ -247,14 +234,14 @@ class CameraProducer:
         new_width = int(width * scale)
         new_height = int(height * scale)
         
-        self.logger.debug(f"Resizing frame from {width}x{height} to {new_width}x{new_height}")
+        logging.debug(f"Resizing frame from {width}x{height} to {new_width}x{new_height}")
         return cv2.resize(frame, (new_width, new_height), interpolation=cv2.INTER_AREA)
 
     def _create_message(self, original_frame: np.ndarray, 
                        processed_frame: np.ndarray, 
                        jpeg_data: np.ndarray) -> dict:
         """
-        Создание 
+        Создание
 
         Args:
             original_frame (np.ndarray): <i>Исходный кадр.</i>
@@ -298,10 +285,10 @@ class CameraProducer:
             self.producer.poll(0)
             
         except BufferError:
-            self.logger.warning("Producer queue is full, frame will be dropped")
+            logging.warning("Producer queue is full, frame will be dropped")
             self.error_count += 1
         except Exception as e:
-            self.logger.error(f"Failed to send message to Kafka: {e}")
+            logging.error(f"Failed to send message to Kafka: {e}")
             self.error_count += 1
 
     def _delivery_callback(self, err: Optional[Exception], msg) -> None:
@@ -313,10 +300,10 @@ class CameraProducer:
             msg: <i>Отправленное сообщение.</i>
         """
         if err:
-            self.logger.error(f'Message delivery failed: {err}')
+            logging.error(f'Message delivery failed: {err}')
             self.error_count += 1
         else:
-            self.logger.debug(
+            logging.debug(
                 f'Message delivered to {msg.topic()}[{msg.partition()}] '
                 f'at offset {msg.offset()}'
             )
