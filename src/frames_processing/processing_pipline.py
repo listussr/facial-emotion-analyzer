@@ -8,7 +8,7 @@ import numpy as np
 import cv2
 
 from .kafka_io import KafkaIO
-from .processing.emotion_recognizer import EmotionRecognizer
+from .processing.emotion_recognition import EmotionRecognizer
 from .processing.face_detection import FaceDetector
 
 
