@@ -7,7 +7,7 @@ import threading
 import logging
 from typing import Optional, Dict
 import numpy as np
-from config import CameraConfig
+from .config import CameraConfig
 
 
 class CameraProducer:
@@ -110,7 +110,7 @@ class CameraProducer:
                         if consecutive_failures >= max_consecutive_failures:
                             logging.error("Max consecutive failures reached, stopping")
                             break
-                        time.sleep(self.reconnect_timeout)
+                        time.sleep(self.config.reconnect_timeout)
                         continue
                 
                 # обработка кадров
