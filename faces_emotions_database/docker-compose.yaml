@@ -1,0 +1,18 @@
+
+version: '3.9'
+
+services:
+  postgres:
+    build: .
+    container_name: face_db
+    ports:
+      - "5433:5432"
+    environment:
+      POSTGRES_DB: emotions
+      POSTGRES_USER: app_user
+      POSTGRES_PASSWORD: basic_app_password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+volumes:
+  postgres_data:
