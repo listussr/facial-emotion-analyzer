@@ -1,7 +1,5 @@
 from typing import Union
-from datetime import datetime
 import uuid
-import json
 import numpy as np
 import logging
 from PIL import Image
@@ -59,13 +57,12 @@ class FacesDBHandler(AbstractDBHandler):
         """
         try:
             query = """
-                SELECT user_id, embedding <=> %s AS distance
+                SELECT user_id, embedding <=> (%s)::vector AS distance
                 FROM face_embeddings
                 ORDER BY distance ASC
-                LIMIT 1
-            """
-            embedding_list = embedding.tolist()
-            result = self._cursor.execute(query, (embedding_list, ))
+            """          
+            self._cursor.execute(query, (embedding.tolist(), ))
+            result = self._cursor.fetchone()
 
             if result:
                 similarity = 1 - result['distance']

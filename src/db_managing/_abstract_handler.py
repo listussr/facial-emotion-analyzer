@@ -1,10 +1,6 @@
 from abc import ABC, abstractmethod
-import uuid
-import json
-import numpy as np
 import psycopg2
 from psycopg2.extras import RealDictCursor
-from datetime import datetime
 from typing import Any, Dict
 
 import logging
