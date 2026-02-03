@@ -8,15 +8,16 @@ import numpy as np
 import cv2
 
 from .kafka_io import KafkaIO
-from .processing.emotion_recognition import EmotionRecognizer
-from .processing.face_detection import FaceDetector
-
+from .processing import EmotionRecognizer, FaceDetector, FaceIdentifier, initialize_deepsort, represent_ltrb, represent_detections
 
 class ProcessingPipeline:
-    def __init__(self, kafka_settings: Dict, detector_settings: Dict, analyzer_settings: Dict, analyze_frequency: int = 5):
+    def __init__(self, kafka_settings: Dict, detector_settings: Dict, analyzer_settings: Dict, 
+                 tracker_settings: Dict, identifier_settings: Dict, analyze_frequency: int = 5):
         self._init_kafka_io(kafka_settings)
         self._init_detector(detector_settings)
         self._init_analyzer(analyzer_settings)
+        self._init_tracker(tracker_settings)
+        self._init_identifier(identifier_settings)
         self._last_result_cache = {}
         self._analysis_frequency = analyze_frequency
         self._frame_counter = 0
@@ -46,6 +47,14 @@ class ProcessingPipeline:
         self._emotion_analyzer = EmotionRecognizer(model_path)
         logging.info("Initialized EmotionAnalyzer in pipeline.")
 
+    def _init_tracker(self, tracker_settings: Dict):
+        self._tracker = initialize_deepsort(tracker_settings)
+        logging.info("Initialized DeepSort in pipeline")
+
+    def _init_identifier(self, identifier_settings: Dict):
+        self._identifier = FaceIdentifier(**identifier_settings)
+        logging.info("Initialized identifier in pipeline")
+
     def _handle_frame(self, frame: np.ndarray, metadata: Dict[str, Any]) -> Dict[str, Any]:
         results = {
             "camera_id": metadata["camera_id"],
@@ -53,26 +62,31 @@ class ProcessingPipeline:
             "faces": []
         }
 
-        bboxes = self._face_detector.detect(frame)
-        if not bboxes:
-            return results
+        detections = self._face_detector.detect(frame)
 
-        for bbox in bboxes:
-            x1, y1, x2, y2 = map(int, bbox[:4])
-            score = bbox[4]
-            if score < 0.5:
+        detections_deepsort = represent_detections(detections)
+
+        tracks = self._tracker.update_tracks(detections_deepsort)
+        
+        for track in tracks:
+            if not track.is_confirmed():
                 continue
+
+            track_id = track.track_id
+            x, y, w, h = represent_ltrb(track)
+
+            x1, x2, y1, y2 = x, x + w, y, y + h
 
             face_crop = frame[y1:y2, x1:x2]
-            if face_crop.size == 0:
-                continue
 
+            face_id = self._identifier.identify(face_crop)
             emotion_probs = self._emotion_analyzer.predict(face_crop)
             emotion_label = self._emotion_analyzer.idx_to_label(np.argmax(emotion_probs))
 
             results["faces"].append({
                 "bbox": [x1, y1, x2, y2],
-                "detection_score": float(score),
+                "face_id": face_id,
+                "track_id": track_id,
                 "emotion": emotion_label,
                 "emotion_scores": emotion_probs.tolist()
             })
