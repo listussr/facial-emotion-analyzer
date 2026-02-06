@@ -1,134 +1,263 @@
-# visualizer.py (обновлённый)
-
+import asyncio
+import contextlib
 import json
 import base64
 import cv2
 import numpy as np
 import logging
 from confluent_kafka import Consumer, Producer
-import time
+from typing import Dict
 from .buffers import SyncBuffer
 
-class Visualizer:
-    def __init__(self, kafka_bootstrap: str, raw_topic: str, analytics_topic: str, output_topic: str = None):
-        self.raw_topic = raw_topic
-        self.analytics_topic = analytics_topic
+class VideoAnnotator(object):
+    def __init__(self, ttl_frames: int, ttl_annotations: int, cleanup_interval: int, kafka_bootstrap: str, frames_topic: str, 
+                 annotations_topic: str, output_topic: str):
+        """
+        #### Аннотатор для соединения кадров с аналитикой.
+
+        Предназначен для сбора кадров и статистики и для последующей их синхронизации.
+
+        Чтение топиков кафки, аннотация и запись в результирующий топик производятся асинхронно.
+
+        :param ttl_frames: Время жизни кадров в буфере синхронизации.
+        :type ttl_frames: int
+        :param ttl_annotations: Время жизни аннотаций в буфере синхронизации.
+        :type ttl_annotations: int
+        :param cleanup_interval: Интервал очистки кадров с истёкшим ttl из буферов.
+        :type cleanup_interval: int
+        :param kafka_bootstrap: Название bootstrap сервера кафки.
+        :type kafka_bootstrap: str
+        :param frames_topic: Название топика с кадрами видеопотока.
+        :type frames_topic: str
+        :param annotations_topic: Название топика со аннотациями кадров.
+        :type annotations_topic: str
+        :param output_topic: Название топика с аннотированными кадрами.
+        :type output_topic: str
+        """
+        self.sync_buffer = SyncBuffer(ttl_frames, ttl_annotations)
+
+        self.cleanup_interval = cleanup_interval
+
+        self._running = False
+
         self.output_topic = output_topic
 
-        self.sync_buffer = SyncBuffer(ttl_seconds=3.0, max_size=100)
+        self._initialize_frames(kafka_bootstrap, frames_topic)
+        self._initialize_annotations(kafka_bootstrap, annotations_topic)
+        self._initialize_producer(kafka_bootstrap)
 
-        self.raw_consumer = Consumer({
+    def _initialize_frames(self, kafka_bootstrap: str, frames_topic: str):
+        """
+        #### Подключение к топику с кадрами.
+        """
+        self.frames_consumer = Consumer({
             'bootstrap.servers': kafka_bootstrap,
             'group.id': 'visualizer-raw',
             'auto.offset.reset': 'latest',
             'fetch.message.max.bytes': 10 * 1024 * 1024
         })
-        self.raw_consumer.subscribe([raw_topic])
+        self.frames_consumer.subscribe([frames_topic])
+        logging.info("Listening to frames topic in Annotator")
 
-        self.analytics_consumer = Consumer({
+    def _initialize_annotations(self, kafka_bootstrap: str, annotations_topic: str):
+        """
+        #### Подключение к топику с аннотациями.
+        """
+        self.annotation_consumer = Consumer({
             'bootstrap.servers': kafka_bootstrap,
             'group.id': 'visualizer-analytics',
             'auto.offset.reset': 'latest'
         })
-        self.analytics_consumer.subscribe([analytics_topic])
+        self.annotation_consumer.subscribe([annotations_topic])
+        logging.info("Listening to annotation topic in Annotator")
 
-        if output_topic:
-            self.producer = Producer({
+    def _initialize_producer(self, kafka_bootstrap: str):
+        """
+        #### Подключение к топику с итоговыми кадрами.
+        """
+        self.producer = Producer({
                 'bootstrap.servers': kafka_bootstrap,
                 'compression.type': 'lz4'
             })
-        else:
-            self.producer = None
+        logging.info(f"Initialized `{self.output_topic}` topic for annotated frames")
 
-    def _draw_annotations(self, frame: np.ndarray, analytics: dict) -> np.ndarray:
+
+    async def _cleanup_loop(self):
+        """
+        #### Цикл очистки буферов с кадрами и аннотациями.
+        """
+        logging.info("Started cleanup")
+        while self._running:
+            self.sync_buffer.cleanup()
+            await asyncio.sleep(self.cleanup_interval)
+
+    def _annotate_and_encode(self, frame, annotation):
+        """
+        #### Утилитная функция для использования в `run_in_executor()`.
+        """
+        annotated = self._draw_annotations(frame, annotation)
+        jpeg = self._encode_frame_to_jpeg(annotated)
+        return jpeg
+
+    def _draw_annotations(self, frame: np.ndarray, annotation: Dict) -> np.ndarray:
+        """
+        #### Метод отрисовки аннотаций на кадре.
+        """
         annotated = frame.copy()
-        cv2.putText(annotated, "ANNOTATED", (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
-        for face in analytics.get("faces", []):
+        for face in annotation.get("faces", []):
             x1, y1, x2, y2 = map(int, face["bbox"])
             emotion = face["emotion"]
-            score = face["detection_score"]
+            score = max(face["emotion_scores"][0])
+            face_id = face.get('face_id', 'Unknown')
             cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 255, 0), 2)
-            label = f"{emotion}: {score:.2f}"
-            cv2.putText(annotated, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 1)
+            label = f"{emotion}: {score:.2f}\n User: {str(face_id)}"
+            cv2.putText(annotated, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
         return annotated
 
     def _encode_frame_to_jpeg(self, frame: np.ndarray) -> bytes:
+        """
+        #### Утилитная функция для использования в `run_in_executor()`.
+        """
         success, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
         if not success:
             raise ValueError("Failed to encode frame")
         return buffer.tobytes()
 
-    def _handle_complete_pair(self, frame: np.ndarray, analytics: dict):
-        """Обрабатывает готовую пару (кадр + аналитика)."""
+    async def _handle_pair(self, frame: Dict, annotation: Dict):
+        """
+        #### Метод для сопоставления кадра и аннотаций с одним идентификатором кадра.
+        """
         try:
-            annotated = self._draw_annotations(frame, analytics)
-            camera_id = analytics["camera_id"]
-            timestamp = analytics["timestamp"]
+            loop = asyncio.get_running_loop()
 
-            if self.producer and self.output_topic:
-                jpeg_bytes = self._encode_frame_to_jpeg(annotated)
-                message = {
-                    "camera_id": camera_id,
-                    "timestamp": timestamp,
-                    "annotated_frame": base64.b64encode(jpeg_bytes).decode('utf-8')
-                }
-                self.producer.produce(
-                    self.output_topic,
-                    key=camera_id.encode(),
-                    value=json.dumps(message).encode('utf-8')
-                )
-                self.producer.poll(0)
-                logging.info(f"Published annotated frame for {camera_id}")
-            else:
-                cv2.imshow(f"Annotated - {camera_id}", annotated)
-                if cv2.waitKey(1) == ord('q'):
-                    raise KeyboardInterrupt
+            jpeg_bytes = await loop.run_in_executor(
+                None,
+                self._annotate_and_encode,
+                frame,
+                annotation
+            )
+            camera_id = annotation["camera_id"]
+            frame_id = annotation["frame_id"]
+
+            message = {
+                "camera_id": camera_id,
+                "frame_id": frame_id,
+                "annotated_frame": base64.b64encode(jpeg_bytes).decode('utf-8')
+            }
+            self.producer.produce(
+                self.output_topic,
+                key=camera_id.encode(),
+                value=json.dumps(message).encode('utf-8')
+            )
+            self.producer.poll(0)
+            logging.info(f"Published annotated frame for {camera_id}")
 
         except Exception as e:
             logging.error(f"Error handling pair: {e}", exc_info=True)
 
-    def _process_raw_frame(self, msg_value: bytes):
-        try:
-            payload = json.loads(msg_value.decode('utf-8'))
-            ts = payload["timestamp"]
-            jpeg_data = base64.b64decode(payload["frame_data"])
-            frame = cv2.imdecode(np.frombuffer(jpeg_data, np.uint8), cv2.IMREAD_COLOR)
-            if frame is not None:
-                result = self.sync_buffer.add_frame(ts, frame)
-                if result:
-                    self._handle_complete_pair(*result)
-        except Exception as e:
-            logging.error(f"Error processing raw frame: {e}")
+    def _decode_frame(self, payload):
+        """
+        #### Утилитная функция для использования в `run_in_executor()`.
+        """
+        jpeg_image = base64.b64decode(payload["frame_data"])
+        return cv2.imdecode(np.frombuffer(jpeg_image, np.uint8), cv2.IMREAD_COLOR)
 
-    def _process_analytics(self, msg_value: bytes):
+    async def _process_frame(self, msg: bytes):
+        """
+        #### Обработка одного кадра.
+        """
         try:
-            analytics = json.loads(msg_value.decode('utf-8'))
-            ts = analytics["timestamp"]
-            result = self.sync_buffer.add_analytics(ts, analytics)
+            loop = asyncio.get_running_loop()
+            payload = json.loads(msg.decode("utf-8"))
+
+            frame = await loop.run_in_executor(
+                None,
+                self._decode_frame,
+                payload
+            )
+
+            result = self.sync_buffer.add_frame(payload["frame_id"], frame)
             if result:
-                self._handle_complete_pair(*result)
+                await self._handle_pair(*result)
         except Exception as e:
-            logging.error(f"Error processing analytics: {e}")
+            logging.error(f"Error in processing frame: {e}")
 
-    def run(self):
-        logging.info("Visualizer with SyncBuffer started")
+    async def _frames_processing(self):
+        """
+        #### Цикл работы с кадрами.
+        """
+        logging.info("Started frames processing")
+        while self._running:
+            msg = self.frames_consumer.poll(0.05)
+
+            if msg is None:
+                await asyncio.sleep(0)
+                continue
+
+            if msg.error():
+                logging.error(msg.error())
+                continue
+
+            await self._process_frame(msg.value())
+
+    async def _process_annotation(self, msg: bytes):
+        """
+        #### Обработка одной аннотации.
+        """
         try:
-            while True:
-                raw_msg = self.raw_consumer.poll(0.05)
-                if raw_msg and not raw_msg.error():
-                    self._process_raw_frame(raw_msg.value())
+            analytics = json.loads(msg.decode('utf-8'))
+            frame_id = analytics["frame_id"]
+            result = self.sync_buffer.add_annotation(frame_id, analytics)
+            if result:
+                await self._handle_pair(*result)
+        except Exception as e:
+            logging.error(f"Error in processing annotation: {e}")
+                
 
-                analytics_msg = self.analytics_consumer.poll(0.05)
-                if analytics_msg and not analytics_msg.error():
-                    self._process_analytics(analytics_msg.value())
+    async def _annotation_processing(self):
+        """
+        #### Цикл работы с аннотациями.
+        """
+        logging.info("Started annotation processing")
+        while self._running:
+            msg = self.annotation_consumer.poll(0.05)
 
-                time.sleep(0.001)
+            if msg is None:
+                await asyncio.sleep(0)
+                continue
 
-        except KeyboardInterrupt:
-            logging.info("Visualizer interrupted")
-        finally:
-            cv2.destroyAllWindows()
-            self.raw_consumer.close()
-            self.analytics_consumer.close()
-            if self.producer:
-                self.producer.flush()
+            if msg.error():
+                logging.error(msg.error())
+                continue
+
+            await self._process_annotation(msg.value())
+
+    async def run(self):
+        """
+        #### Запуск асинхронного пайплайна аннотации кадров.
+
+        Асинхронно реализуется получение кадров, получение аннотаций и процесс фоновой очистки буфера.
+        """
+        self._running = True
+        self._frames_task = asyncio.create_task(self._frames_processing())
+        self._annotation_task = asyncio.create_task(self._annotation_processing())
+        self._cleanup_task = asyncio.create_task(self._cleanup_loop())
+
+    async def stop(self):
+        """
+        #### Остановка цикла аннотации кадров.
+        """
+        logging.info("Finishing all annotator's tasks")
+        self._running = False
+
+        for task in (self._frames_task, self._annotation_task, self._cleanup_task):
+            if task:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+
+        self.frames_consumer.close()
+        self.annotation_consumer.close()
+
+        if self.producer:
+            self.producer.flush(5)

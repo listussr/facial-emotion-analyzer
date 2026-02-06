@@ -58,7 +58,7 @@ class ProcessingPipeline:
     def _handle_frame(self, frame: np.ndarray, metadata: Dict[str, Any]) -> Dict[str, Any]:
         results = {
             "camera_id": metadata["camera_id"],
-            "timestamp": metadata["timestamp"],
+            "frame_id": metadata["frame_id"],
             "faces": []
         }
 
@@ -66,8 +66,9 @@ class ProcessingPipeline:
 
         detections_deepsort = represent_detections(detections)
 
-        tracks = self._tracker.update_tracks(detections_deepsort)
-        
+
+        tracks = self._tracker.update_tracks(detections_deepsort, frame=frame)
+
         for track in tracks:
             if not track.is_confirmed():
                 continue
@@ -135,18 +136,20 @@ class ProcessingPipeline:
                     if last_result is not None:
                         inherited_result = {
                             "camera_id": camera_id,
-                            "timestamp": payload["timestamp"],
+                            "frame_id": payload["frame_id"],
                             "faces": last_result["faces"]
                         }
                         self._kafka.produce(inherited_result)
+                        logging.info(f"Sent to kafka at timestamp: {payload['timestamp']}: {last_result['faces']}")
                     else:
 
                         empty_result = {
                             "camera_id": camera_id,
-                            "timestamp": payload["timestamp"],
+                            "frame_id": payload["frame_id"],
                             "faces": []
                         }
                         self._kafka.produce(empty_result)
+                        logging.info(f"Sent to kafka at timestamp: {payload['timestamp']}: {last_result['faces']}")
 
             except Exception as e:
                 logging.error(f"Processing error: {e}", exc_info=True)

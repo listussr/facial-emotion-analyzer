@@ -42,6 +42,7 @@ class CameraProducer:
         self.error_count = 0
         self.start_time: Optional[float] = None
         self.last_frame_time: Optional[float] = None
+        self.frame_id = 0
         
         logging.info(f"Initialized for partition {self.config.partition} "
                         f"(total partitions: {self.config.total_partitions})")
@@ -187,6 +188,8 @@ class CameraProducer:
             frame (np.ndarray): <i>Исходный кадр</i>
         """
         try:
+            frame_id = self.frame_id
+            self.frame_id += 1
             processed_frame = self._resize_frame(frame)
             
             success, jpeg_data = cv2.imencode(
@@ -206,7 +209,7 @@ class CameraProducer:
                 )
                 return
             
-            message = self._create_message(frame, processed_frame, jpeg_data)
+            message = self._create_message(frame_id, frame, processed_frame, jpeg_data)
             message_json = json.dumps(message)
             
             self._send_to_kafka(message_json)
@@ -237,7 +240,7 @@ class CameraProducer:
         logging.debug(f"Resizing frame from {width}x{height} to {new_width}x{new_height}")
         return cv2.resize(frame, (new_width, new_height), interpolation=cv2.INTER_AREA)
 
-    def _create_message(self, original_frame: np.ndarray, 
+    def _create_message(self, frame_id: int, original_frame: np.ndarray, 
                        processed_frame: np.ndarray, 
                        jpeg_data: np.ndarray) -> dict:
         """
@@ -253,7 +256,8 @@ class CameraProducer:
         """
         return {
             'camera_id': self.config.camera_id,
-            'timestamp': time.time_ns(),
+            'frame_id': frame_id,
+            'timestamp': time.time(),
             'frame_data': base64.b64encode(jpeg_data).decode('utf-8'),
             'processed_width': processed_frame.shape[1],
             'processed_height': processed_frame.shape[0],
