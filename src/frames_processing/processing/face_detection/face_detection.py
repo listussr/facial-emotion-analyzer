@@ -10,10 +10,10 @@ mp_drawing = mp.solutions.drawing_utils
 class FaceDetector(object):
     def __init__(self, min_detection_confidence: float = 0.5):
         """
-        Инициализация детектора лиц MediaPipe.
+        #### Детектор лиц на изображении. 
         
-        Args:
-            min_detection_confidence (float): порог уверенности.
+        :param min_detection_confidence: Порог уверенности алгоритма.
+        :type min_detection_confidence: float
         """
         self.face_detection = mp_face_detection.FaceDetection(
             min_detection_confidence=min_detection_confidence,
@@ -23,16 +23,15 @@ class FaceDetector(object):
 
     def detect(self, image: np.ndarray) -> List[Tuple[float, float, float, float, float]]:
         """
-        Детекция лиц на изображении.
-
-        Args:
-            image (np.ndarray): Изображение в формате BGR или RGB (H, W, 3).
-
-        Returns:
-            List[Tuple[str, np.ndarray]]: Список пар (face_id, bounding_box),
-                где bounding_box — массив [x_min, y_min, x_max, y_max] в пикселях.
+        #### Детекция лиц на изображении.
+        
+        :param image: Изображение в формате BGR или RGB (H, W, 3).
+        :type image: np.ndarray
+        :return: Список информации о лицах в виде (x_left, y_left, width, height, confidence).
+        :rtype: List[Tuple[float, float, float, float, float]]
         """
         if image is None or image.size == 0:
+            logging.warning("Faces detector got empty image")
             return []
 
         if image.shape[2] == 3:
@@ -50,18 +49,18 @@ class FaceDetector(object):
                 conf = detection.score[0]
                 x_min = int(bbox.xmin * w)
                 y_min = int(bbox.ymin * h)
-                x_max = x_min + int(bbox.width * w)
-                y_max = y_min + int(bbox.height * h)
+                width = int(bbox.width * w)
+                height = int(bbox.height * h)
 
                 x_min = max(0, x_min)
                 y_min = max(0, y_min)
-                x_max = min(w - 1, x_max)
-                y_max = min(h - 1, y_max)
+                width = min(w - x_min, width)
+                height = min(h - y_min, height)
 
-                if x_max <= x_min or y_max <= y_min:
+                if width <= 0 or height <= 0:
                     continue
 
-                detections.append([x_min, y_min, x_max, y_max, conf])
+                detections.append([x_min, y_min, width, height, conf])
 
         return detections
 
