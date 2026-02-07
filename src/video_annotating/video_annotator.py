@@ -150,7 +150,6 @@ class VideoAnnotator(object):
                 value=json.dumps(message).encode('utf-8')
             )
             self.producer.poll(0)
-            logging.info(f"Published annotated frame for {camera_id}")
 
         except Exception as e:
             logging.error(f"Error handling pair: {e}", exc_info=True)
