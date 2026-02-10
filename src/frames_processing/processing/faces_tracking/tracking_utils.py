@@ -1,4 +1,5 @@
 from typing import Dict, List, Tuple
+import numpy as np
 from deep_sort_realtime.deepsort_tracker import DeepSort
 
 def initialize_deepsort(deep_sort_settings: Dict) -> DeepSort:
@@ -34,7 +35,24 @@ def represent_ltrb(track) -> Tuple:
     :rtype: Tuple
     """
     ltrb = track.to_ltrb()
-    return int(ltrb[0]), int(ltrb[1]), int(ltrb[2] - ltrb[0]), int(ltrb[3] - ltrb[1])
+    if ltrb is None:
+        return None
+
+    if len(ltrb) < 4:
+        return None
+
+    x1, y1, x2, y2 = ltrb[:4]
+
+    if not np.isfinite([x1, y1, x2, y2]).all():
+        return None
+
+    w = x2 - x1
+    h = y2 - y1
+
+    if w <= 0 or h <= 0:
+        return None
+
+    return int(x1), int(y1), int(w), int(h)
 
 def represent_detections(detections: List[Tuple]) -> List[List]:
     """
@@ -46,6 +64,24 @@ def represent_detections(detections: List[Tuple]) -> List[List]:
     :rtype: List[List]
     """
     repr_detections = []
-    for (x, y, w, h, conf) in detections:
-        repr_detections.append([[x, y, w, h], conf, 'face'])
+
+    for det in detections:
+        if det is None:
+            continue
+
+        if not isinstance(det, (tuple, list)):
+            continue
+
+        if len(det) < 5:
+            continue
+
+        x, y, w, h, conf = det[:5]
+
+        if w <= 0 or h <= 0:
+            continue
+
+        if conf <= 0.3:
+            continue
+
+        repr_detections.append([[int(x), int(y), int(w), int(h)], float(conf), 'face'])
     return repr_detections

@@ -4,6 +4,7 @@ import os
 import json
 import contextvars
 import colorama
+import traceback
 
 colorama.init()
 
@@ -49,6 +50,12 @@ class JSONFormatter(logging.Formatter):
             "lineno": record.lineno,
             "funcName": record.funcName,
         }
+
+        if record.exc_info:
+            log_entry["exception"] = "".join(
+                traceback.format_exception(*record.exc_info)
+            )
+
         return json.dumps(log_entry, ensure_ascii=False)
 
 def setup_logger(

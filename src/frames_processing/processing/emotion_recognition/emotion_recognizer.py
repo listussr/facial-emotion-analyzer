@@ -22,8 +22,7 @@ class EmotionRecognizer(object):
         """
         self._set_device()
         self._set_model(model_path)
-        self.emotion_labels = ('anger', 'contempt', 'disgust', 'fear', 'happy', 'neutral', 'sad', 'surprise')
-
+        
     def _set_device(self) -> None:
         """
         Установка девайса для инференса модели.
@@ -57,21 +56,6 @@ class EmotionRecognizer(object):
         pil_image = Image.fromarray(image.astype('uint8'))
         tensor = self.data_transforms(pil_image).unsqueeze(0).to(self._device)
         with torch.no_grad():
-            output = self.model.forward(tensor)
+            output = self.model(tensor)
+            output = torch.softmax(output, dim=1)
         return output.cpu().numpy()
-
-    def idx_to_label(self, idx: int) -> str:
-        """
-        Возврат названия эмоции по её индексу.
-        ---
-
-        Args:
-            idx (int): Индекс эмоции.
-
-        Returns:
-            str: Название эмоции.
-        """
-        if idx < 0 or idx >= len(self.emotion_labels):
-            logging.error(f"Incorrect emotion index. Required [0..7] but got {idx}")
-            return ""
-        return self.emotion_labels[idx]
