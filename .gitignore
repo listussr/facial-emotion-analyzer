@@ -208,3 +208,5 @@ __marimo__/
 
 */test_videos
 */models
+*.pth
+*.onnx

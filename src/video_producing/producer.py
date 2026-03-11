@@ -1,6 +1,6 @@
 import time
 import cv2
-import base64
+import msgpack
 import json
 from confluent_kafka import Producer
 import threading
@@ -163,7 +163,7 @@ class CameraProducer:
             try:
                 ret, frame = self.cap.read()
                 if not ret:
-                    logging.warning("Failed to read frame, reinitializing capture")
+                    #logging.warning("Failed to read frame, reinitializing capture")
                     break
                 
                 self._process_frame(frame)
@@ -208,11 +208,10 @@ class CameraProducer:
                     f"Max allowed: {self.config.max_message_size}"
                 )
                 return
-            
+
             message = self._create_message(frame_id, frame, processed_frame, jpeg_data)
-            message_json = json.dumps(message)
             
-            self._send_to_kafka(message_json)
+            self._send_to_kafka(message)
             
         except Exception as e:
             logging.error(f"Error in frame processing: {e}")
@@ -242,7 +241,7 @@ class CameraProducer:
 
     def _create_message(self, frame_id: int, original_frame: np.ndarray, 
                        processed_frame: np.ndarray, 
-                       jpeg_data: np.ndarray) -> dict:
+                       jpeg_data: np.ndarray) -> bytes:
         """
         Создание
 
@@ -254,11 +253,11 @@ class CameraProducer:
         Returns:
             dict: <i>Словарь для отправки в кафку.</i>
         """
-        return {
+        return msgpack.packb({
             'camera_id': self.config.camera_id,
-            'frame_id': frame_id,
+            'frame_id': str(frame_id),
             'timestamp': time.time(),
-            'frame_data': base64.b64encode(jpeg_data).decode('utf-8'),
+            'frame_data': jpeg_data.tobytes(),
             'processed_width': processed_frame.shape[1],
             'processed_height': processed_frame.shape[0],
             'original_width': original_frame.shape[1],
@@ -266,9 +265,9 @@ class CameraProducer:
             'quality': self.config.quality,
             'frame_rate': self.config.frame_rate,
             'format': 'jpeg'
-        }
+        })
 
-    def _send_to_kafka(self, message_json: str) -> None:
+    def _send_to_kafka(self, message: bytes) -> None:
         """
         Отправка сообщений в кафку
 
@@ -281,7 +280,7 @@ class CameraProducer:
             self.producer.produce(
                 topic=self.config.topic_name,
                 key=self.config.camera_id.encode('utf-8'),
-                value=message_json,
+                value=message,
                 partition=effective_partition,
                 callback=self._delivery_callback
             )

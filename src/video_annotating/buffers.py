@@ -34,8 +34,8 @@ class TTLBuffer(object):
         for key in keys:
             del self.buffer[key]
 
-        if len(keys) > 0:
-            logging.info(f"From buffer {self.buffer_name} deleted {len(keys)} objects")
+        #if len(keys) > 0:
+        #    logging.info(f"From buffer {self.buffer_name} deleted {len(keys)} objects")
 
     def insert(self, key: Any, value: Any):
         """
