@@ -1,7 +1,7 @@
 import time
 import logging
 import json
-import base64
+import msgpack
 from typing import Any, Dict, List
 
 import numpy as np
@@ -22,7 +22,7 @@ from .processing import (
 class ProcessingPipeline:
     def __init__(self, kafka_settings: Dict, detector_settings: Dict, analyzer_settings: Dict, 
                  tracker_settings: Dict, identifier_settings: Dict, emotion_frequency: int = 5,
-                 cache_cleanup: int = 10, exp_smoothing_coef: float = 0.8, detection_frequency: int = 5):
+                 cache_cleanup: int = 10, exp_smoothing_coef: float = 0.8, detection_frequency: int = 1):
         """
         #### Пайплайн обработки видеопотока.
         
@@ -309,8 +309,8 @@ class ProcessingPipeline:
                 continue
 
             try:
-                payload = json.loads(raw_msg.decode('utf-8'))
-                jpeg_data = base64.b64decode(payload["frame_data"])
+                payload = msgpack.unpackb(raw_msg, raw=False)
+                jpeg_data = payload["frame_data"]
                 frame = cv2.imdecode(np.frombuffer(jpeg_data, np.uint8), cv2.IMREAD_COLOR)
 
                 if frame is None:
