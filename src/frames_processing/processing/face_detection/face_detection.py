@@ -36,9 +36,9 @@ class FaceDetector(object):
         :type width: int
         :param frame_height: Высота кадра.
         :type frame_height: int
-        :param frame_width: Ширина кадра
+        :param frame_width: Ширина кадра.
         :type frame_width: int
-        :return: 
+        :return: Флаг наличия в кадре лица.
         :rtype: bool
         """
         ratio = height / max(width, 1)
