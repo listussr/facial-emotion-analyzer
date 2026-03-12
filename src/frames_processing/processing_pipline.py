@@ -100,8 +100,7 @@ class ProcessingPipeline:
         """
         #### Инициализация анализатора эмоций.
         """
-        model_path = analyzer_settings.get("model_path", r"src\frames_processing\processing\models\resnet_18.pth")
-        self._emotion_analyzer = EmotionRecognizer(model_path)
+        self._emotion_analyzer = EmotionRecognizer(**analyzer_settings)
         logging.info("Initialized EmotionAnalyzer in pipeline.")
 
     def _init_tracker(self, tracker_settings: Dict):
