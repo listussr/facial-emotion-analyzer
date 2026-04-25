@@ -1,6 +1,7 @@
 from typing import Dict, List, Tuple
 import numpy as np
 from deep_sort_realtime.deepsort_tracker import DeepSort
+import supervision as sv
 
 def initialize_deepsort(deep_sort_settings: Dict) -> DeepSort:
     """
@@ -25,6 +26,15 @@ def initialize_deepsort(deep_sort_settings: Dict) -> DeepSort:
         embedder=embedder_model_name,
         embedder_gpu=embedder_gpu,
     )
+
+def initialize_bytetrack(bytetrack_settings: Dict) -> sv.ByteTrack:
+    return sv.ByteTrack(
+            track_activation_threshold=bytetrack_settings.get("track_activation_threshold", 0.25),
+            lost_track_buffer=bytetrack_settings.get("lost_track_buffer", 30),
+            minimum_matching_threshold=bytetrack_settings.get("minimum_matching_threshold", 0.8),
+            frame_rate=bytetrack_settings.get("frame_rate", 20),
+            minimum_consecutive_frames=bytetrack_settings.get("minimum_consecutive_frames", 3),
+        )
 
 def represent_ltrb(track) -> Tuple:
     """
