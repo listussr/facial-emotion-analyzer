@@ -210,3 +210,4 @@ __marimo__/
 */models
 *.pth
 *.onnx
+*.claude

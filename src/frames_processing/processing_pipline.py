@@ -12,11 +12,10 @@ from .processing import (
     EmotionRecognizer,
     FaceDetector,
     FaceIdentifier,
-    initialize_deepsort,
+    get_tracker,
     represent_ltrb,
-    represent_detections,
     fast_face_filter,
-    get_emotion_smoothing_strategy
+    get_emotion_smoothing_strategy,
 )
 
 class ProcessingPipeline:
@@ -105,10 +104,13 @@ class ProcessingPipeline:
 
     def _init_tracker(self, tracker_settings: Dict):
         """
-        #### Инициализация трекера лиц. 
+        #### Инициализация трекера лиц.
+
+        Тип трекера выбирается полем `type` в `tracker_settings`
+        ("deepsort" | "bytetrack"). По умолчанию используется DeepSORT.
         """
-        self._tracker = initialize_deepsort(tracker_settings)
-        logging.info("Initialized DeepSort in pipeline")
+        self._tracker = get_tracker(tracker_settings)
+        logging.info("Initialized tracker in pipeline")
 
     def _init_identifier(self, identifier_settings: Dict):
         """
@@ -214,14 +216,9 @@ class ProcessingPipeline:
             detections = None
 
         if detections:
-            detections_deepsort = represent_detections(detections)
-            tracks = self._tracker.update_tracks(
-                detections_deepsort,
-                frame=frame
-            )
+            tracks = self._tracker.update(detections, frame)
         else:
-            self._tracker.tracker.predict()
-            tracks = self._tracker.tracker.tracks
+            tracks = self._tracker.predict()
 
         gray_full = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
