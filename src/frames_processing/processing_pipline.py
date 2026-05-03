@@ -163,28 +163,31 @@ class ProcessingPipeline:
             "emotion_switch_counter": 0,
         }
 
-    def _update_emotion(self, cached: Dict, face_crop: np.ndarray):
+    def _apply_emotion_batch(self, pending: List):
         """
-        #### Предсказание эмоции по лицу.
-        
-        :param cached: Кэшированные данные.
-        :type cached: Dict
-        :param face_crop: Изображение лица.
-        :type face_crop: np.ndarray
-        """
-        cached["emotion_counter"] += 1
+        #### Батч-инференс эмоций для накопленных лиц.
 
-        if cached["emotion_counter"] < self._emotion_frequency:
+        Все лица текущего кадра, у которых счётчик достиг порога, прогоняются
+        через модель одним вызовом. Это значительно быстрее, чем вызывать
+        предсказание по одному лицу за раз.
+
+        :param pending: Список кортежей `(cached, face_crop)`.
+        :type pending: List
+        """
+        if not pending:
             return
 
-        probs = np.asarray(self._emotion_analyzer.predict(face_crop)).ravel()
-        self._emotion_smoothing(
-            cached,
-            probs,
-            frequency=self._emotion_frequency,
-            ema_coef=self._exp_smoothing_coef,
-        )
-        cached["emotion_counter"] = 0
+        crops = [c for _, c in pending]
+        probs_batch = np.asarray(self._emotion_analyzer.predict(crops))
+
+        for (cached, _), probs in zip(pending, probs_batch):
+            self._emotion_smoothing(
+                cached,
+                np.asarray(probs).ravel(),
+                frequency=self._emotion_frequency,
+                ema_coef=self._exp_smoothing_coef,
+            )
+            cached["emotion_counter"] = 0
 
     def _handle_frame(self, frame: np.ndarray, metadata: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -220,7 +223,11 @@ class ProcessingPipeline:
         else:
             tracks = self._tracker.predict()
 
-        gray_full = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        gray_full = None
+        frame_h, frame_w = frame.shape[:2]
+
+        pending_faces = []
+        result_entries = []
 
         for track in tracks:
             if not track.is_confirmed():
@@ -237,21 +244,22 @@ class ProcessingPipeline:
                 continue
 
             x, y, w, h = ltrb
-            frame_h, frame_w = frame.shape[:2]
 
             x1, x2 = max(x, 0), min(x + w, frame_w)
             y1, y2 = max(y, 0), min(y + h, frame_h)
 
             face_crop = frame[y1:y2, x1:x2]
-            gray_crop = gray_full[y1:y2, x1:x2]
 
             if face_crop.size == 0:
                 continue
 
             face_valid = self._tracks_face_valid.get(cache_key)
             if face_valid is None:
-                if track.hits < 3: 
+                if track.hits < 3:
                     continue
+                if gray_full is None:
+                    gray_full = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                gray_crop = gray_full[y1:y2, x1:x2]
                 face_valid = fast_face_filter(gray_crop, w, h)
                 self._tracks_face_valid[cache_key] = face_valid
 
@@ -263,20 +271,28 @@ class ProcessingPipeline:
                 cached = self._update_identity(track, face_crop)
                 self._cached_faces[cache_key] = cached
 
-            face_id = cached["face_id"]
+            cached["emotion_counter"] += 1
+            if cached["emotion_counter"] >= self._emotion_frequency:
+                pending_faces.append((cached, face_crop))
 
-            self._update_emotion(cached, face_crop)
-
-            results["faces"].append({
+            entry = {
                 "bbox": [x1, y1, x2, y2],
                 "track_id": track_id,
-                "face_id": face_id,
-                "emotion": cached["emotion_label"],
-                "emotion_scores": (
-                    cached["emotion_probs"].tolist()
-                    if cached["emotion_probs"] is not None else []
-                )
-            })
+                "face_id": cached["face_id"],
+                "emotion": None,
+                "emotion_scores": []
+            }
+            results["faces"].append(entry)
+            result_entries.append((cached, entry))
+
+        self._apply_emotion_batch(pending_faces)
+
+        for cached, entry in result_entries:
+            entry["emotion"] = cached["emotion_label"]
+            entry["emotion_scores"] = (
+                cached["emotion_probs"].tolist()
+                if cached["emotion_probs"] is not None else []
+            )
 
         if self._frame_num % self._cache_cleanup == 0:
             self._clean_cache(tracks, metadata["camera_id"])
