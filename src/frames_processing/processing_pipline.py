@@ -1,7 +1,10 @@
 import time
 import logging
+import queue
+import threading
 import json
 import msgpack
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List
 
 import numpy as np
@@ -67,6 +70,14 @@ class ProcessingPipeline:
         self._emotion_smoothing = get_emotion_smoothing_strategy('ema_hysteresis')
 
         self._exp_smoothing_coef = exp_smoothing_coef
+
+        # Идентификация лица (FaceNet-эмбеддинг + поиск в БД) уезжает в
+        # фоновый пул, чтобы не держать Stage B. До завершения у трека
+        # стоит pending-id; как только воркер получит реальный — обновит
+        # cached["face_id"] напрямую.
+        self._identity_executor = ThreadPoolExecutor(
+            max_workers=2, thread_name_prefix="pipeline-identify"
+        )
 
         logging.info("Initialized frames processing Pipeline")
 
@@ -142,26 +153,45 @@ class ProcessingPipeline:
 
     def _update_identity(self, track, face_crop: np.ndarray) -> Dict:
         """
-        #### Идентификация лица.
-        
+        #### Создать запись кэша для нового трека и запустить идентификацию в фоне.
+
         :param track: Трек с лицом.
         :param face_crop: Лицо с кадра.
         :type face_crop: np.ndarray
-        :return: Словарь с данными эмоций и face_id для вставки в кэш.
+        :return: Словарь с данными для кэша (`face_id` пока pending-init).
         :rtype: Dict
         """
-        appearance = getattr(track, "last_feature", None)
-
-        face_id = self._identifier.identify(face_crop, appearance)
-
-        return {
-            "face_id": face_id,
+        cached: Dict = {
+            "face_id": "pending-init",
             "emotion_label": None,
             "emotion_probs": np.zeros(8),
             "votes": np.zeros(8, dtype=np.int32),
             "emotion_counter": 0,
             "emotion_switch_counter": 0,
         }
+        appearance = getattr(track, "last_feature", None)
+        crop_copy = face_crop.copy()
+        self._identity_executor.submit(
+            self._fill_identity_async, cached, crop_copy, appearance
+        )
+        return cached
+
+    def _fill_identity_async(
+        self,
+        cached: Dict,
+        face_crop: np.ndarray,
+        appearance: np.ndarray,
+    ) -> None:
+        """
+        Воркер: считает эмбеддинг, ищет/создаёт запись в БД, дописывает
+        реальный face_id обратно в `cached`. Любые ошибки логируем —
+        пайплайн продолжит работать с pending-id.
+        """
+        try:
+            face_id = self._identifier.identify(face_crop, appearance)
+            cached["face_id"] = face_id
+        except Exception:
+            logging.exception("Identity worker failed; keeping pending id")
 
     def _apply_emotion_batch(self, pending: List):
         """
@@ -300,43 +330,158 @@ class ProcessingPipeline:
 
         return results
 
-    def process(self):
+    def _stage_consume_decode(
+        self,
+        in_q: "queue.Queue",
+        stop: threading.Event,
+    ) -> None:
         """
-        #### Запуск пайплайна обработки.
+        Стадия A: читает сообщения из Kafka, декодирует JPEG в np.ndarray
+        и кладёт `(frame, payload)` в очередь для стадии B.
 
-        Порядок обработки одного отдельно взятого кадра.
-            -> Детекция лиц.
-            -> Трекинг лиц.
-            -> Идентификация лиц (если трек новый).
-            -> Распознавание эмоций.
+        Если очередь заполнена — `put` блокируется, обеспечивая backpressure:
+        чтение из Kafka замедляется до скорости обработки, а не растит
+        потребление памяти.
         """
-        logging.info("Processing pipeline started")
-        frame_count = 0
-        start_time = time.time()
-
-        while True:
-            raw_msg = self._kafka.consume()
+        log = logging.getLogger("pipeline.A")
+        log.info("Stage A (consume+decode) started")
+        while not stop.is_set():
+            raw_msg = self._kafka.consume(timeout=0.5)
             if raw_msg is None:
-                time.sleep(0.01)
                 continue
-
             try:
                 payload = msgpack.unpackb(raw_msg, raw=False)
                 jpeg_data = payload["frame_data"]
                 frame = cv2.imdecode(np.frombuffer(jpeg_data, np.uint8), cv2.IMREAD_COLOR)
-
                 if frame is None:
                     logging.warning("Failed to decode frame")
                     continue
+                while not stop.is_set():
+                    try:
+                        in_q.put((frame, payload), timeout=0.5)
+                        break
+                    except queue.Full:
+                        continue
+            except Exception:
+                logging.exception("Stage A error")
+        try:
+            in_q.put_nowait(None)
+        except queue.Full:
+            pass
+        log.info("Stage A stopped")
 
-                result = self._handle_frame(frame, payload)
-                self._kafka.produce(result)
+    def _stage_produce(
+        self,
+        out_q: "queue.Queue",
+    ) -> None:
+        """
+        Стадия C: забирает готовый результат и публикует в Kafka.
+        """
+        log = logging.getLogger("pipeline.C")
+        log.info("Stage C (produce) started")
+        while True:
+            item = out_q.get()
+            if item is None:
+                break
+            try:
+                self._kafka.produce(item)
+            except Exception:
+                logging.exception("Stage C error")
+        log.info("Stage C stopped")
 
-                frame_count += 1
-                if frame_count % 100 == 0:
-                    elapsed = time.time() - start_time
-                    fps = frame_count / elapsed if elapsed > 0 else 0
-                    logging.info(f"Analyzed {frame_count} frames ({fps:.1f} FPS)")
+    def process(self):
+        """
+        #### Запуск пайплайна обработки.
 
-            except Exception as e:
-                logging.exception("Error in pipeline")
+        Архитектура — три ступени с ограниченными очередями между ними:
+
+
+        - A: consume + decode
+    
+        - B: detect / track / identify / emotion
+
+        - C: produce result
+
+        Каждая ступень загружает разные ресурсы: A — сеть/декодер, B — CPU/GPU, C — сеть.
+        """
+        logging.info("Processing pipeline started (threaded)")
+
+        in_q: queue.Queue = queue.Queue(maxsize=4)
+        out_q: queue.Queue = queue.Queue(maxsize=4)
+        stop = threading.Event()
+
+        consumer_thread = threading.Thread(
+            target=self._stage_consume_decode,
+            args=(in_q, stop),
+            name="pipeline-consume",
+            daemon=True,
+        )
+        producer_thread = threading.Thread(
+            target=self._stage_produce,
+            args=(out_q,),
+            name="pipeline-produce",
+            daemon=True,
+        )
+        consumer_thread.start()
+        producer_thread.start()
+
+        frame_count = 0
+
+        WINDOW = 100
+        last_window_t = None
+
+        try:
+            while not stop.is_set():
+                try:
+                    item = in_q.get(timeout=0.5)
+                except queue.Empty:
+                    continue
+                if item is None:
+                    break
+                frame, payload = item
+                try:
+                    result = self._handle_frame(frame, payload)
+                    while not stop.is_set():
+                        try:
+                            out_q.put(result, timeout=0.5)
+                            break
+                        except queue.Full:
+                            continue
+
+                    frame_count += 1
+                    if last_window_t is None:
+                        last_window_t = time.time()
+                    if frame_count % WINDOW == 0:
+                        now = time.time()
+                        dt = now - last_window_t
+                        fps = WINDOW / dt if dt > 0 else 0
+                        last_window_t = now
+                        logging.info(
+                            f"Analyzed {frame_count} frames "
+                            f"({fps:.1f} FPS over last {WINDOW}) "
+                            f"[in_q={in_q.qsize()}/{in_q.maxsize}, "
+                            f"out_q={out_q.qsize()}/{out_q.maxsize}]"
+                        )
+                except Exception:
+                    logging.exception("Stage B error on frame")
+        except KeyboardInterrupt:
+            logging.info("Pipeline interrupted, shutting down")
+        finally:
+            stop.set()
+            try:
+                out_q.put(None, timeout=1.0)
+            except queue.Full:
+                pass
+            consumer_thread.join(timeout=2.0)
+            producer_thread.join(timeout=2.0)
+
+            try:
+                self._identity_executor.shutdown(wait=False, cancel_futures=True)
+            except Exception:
+                logging.exception("Identity executor shutdown failed")
+
+            try:
+                self._kafka.close()
+            except Exception:
+                logging.exception("KafkaIO close failed")
+            logging.info("Pipeline stopped")

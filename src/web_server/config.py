@@ -13,10 +13,10 @@ class Settings:
 
     UPLOADS_DIR: Path = REPO_ROOT / "data" / "uploads"
 
-    DEFAULT_FRAME_RATE: int = 20
-    DEFAULT_QUALITY: int = 80
-    DEFAULT_MAX_WIDTH: int = 1280
-    DEFAULT_MAX_HEIGHT: int = 720
+    DEFAULT_FRAME_RATE: int = 60
+    DEFAULT_QUALITY: int = 60
+    DEFAULT_MAX_WIDTH: int = 854
+    DEFAULT_MAX_HEIGHT: int = 480
 
     MAX_UPLOAD_SIZE_MB: int = 2048
 

@@ -1,6 +1,7 @@
+import asyncio
 from typing import List, Optional
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
 
 from ..schemas import CreateCameraRequest, SessionInfo, SessionKind
 from ..services.session_manager import session_manager
@@ -35,7 +36,14 @@ def create_camera(req: CreateCameraRequest):
 
 
 @router.delete("/{session_id}")
-def stop_session(session_id: str):
-    if not session_manager.stop(session_id):
+async def stop_session(session_id: str, bg: BackgroundTasks):
+    """
+    Снимаем сессию из реестра синхронно (мгновенно), а тяжёлый
+    `producer.stop()` уносим в фон. Иначе запрос держит worker до 10–15 секунд
+    и блокирует другие эндпоинты.
+    """
+    producer = session_manager.detach(session_id)
+    if producer is None:
         raise HTTPException(status_code=404, detail="Session not found")
+    bg.add_task(session_manager.shutdown_producer, producer, session_id)
     return {"ok": True, "stopped": session_id}

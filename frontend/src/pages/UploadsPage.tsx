@@ -22,6 +22,7 @@ export default function UploadsPage() {
   const [tracker, setTracker] = useState<TrackerName>('deepsort');
   const [model, setModel] = useState<EmotionModel>('resnet-18');
   const [device, setDevice] = useState<Device>('cpu');
+  const [frameRate, setFrameRate] = useState<number>(20);
   const [busy, setBusy] = useState(false);
   const [pendingFile, setPendingFile] = useState<File | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -41,7 +42,7 @@ export default function UploadsPage() {
       await api.startUploadSession({
         upload_id: upload.upload_id,
         name: pendingFile.name,
-        frame_rate: 20,
+        frame_rate: frameRate,
         config: { tracker, model, device },
       });
       setPendingFile(null);
@@ -163,6 +164,20 @@ export default function UploadsPage() {
                   GPU
                 </button>
               </div>
+            </div>
+            <div>
+              <div className="label mb-1">
+                Частота кадров{' '}
+                <span className="text-slate-400">(больше = быстрее обработка)</span>
+              </div>
+              <input
+                className="field"
+                type="number"
+                min={1}
+                max={120}
+                value={frameRate}
+                onChange={(e) => setFrameRate(Math.max(1, Math.min(120, Number(e.target.value) || 20)))}
+              />
             </div>
             <div className="flex items-center justify-between">
               <div>

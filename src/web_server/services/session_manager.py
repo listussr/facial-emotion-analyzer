@@ -70,6 +70,18 @@ class _Session:
                 status = "error"
             else:
                 status = "done"
+        # Метрики из продюсера (если он умеет их давать)
+        frames_sent = int(getattr(self.producer, "frame_count", 0) or 0)
+        errors = int(getattr(self.producer, "error_count", 0) or 0)
+        fps = 0.0
+        try:
+            stats_fn = getattr(self.producer, "get_stats", None)
+            if callable(stats_fn):
+                stats = stats_fn()
+                fps = float(stats.get("current_fps", 0.0)) if stats else 0.0
+        except Exception:
+            pass
+
         return SessionInfo(
             id=self.id,
             kind=self.kind,
@@ -79,6 +91,9 @@ class _Session:
             config=self.config,
             frame_rate=self.frame_rate,
             started_at=self.started_at,
+            frames_sent=frames_sent,
+            errors=errors,
+            fps=fps,
             filename=self.filename,
             file_size=self.file_size,
         )
@@ -143,9 +158,14 @@ class SessionManager:
             max_height=settings.DEFAULT_MAX_HEIGHT,
             max_message_size=5_000_000,
             reconnect_timeout=5,
+            stop_on_end=(kind == "upload"),
         )
         producer = CameraProducer(cam_cfg)
         producer.start()
+        self._log.info(
+            f"Spawned producer for {camera_id}: "
+            f"source={source!r}, frame_rate={frame_rate}, kind={kind}"
+        )
 
         sess = _Session(
             id=camera_id,
@@ -174,16 +194,35 @@ class SessionManager:
         return sess.info() if sess else None
 
 
-    def stop(self, session_id: str) -> bool:
+    def detach(self, session_id: str) -> Optional[CameraProducer]:
+        """
+        Снимает сессию из реестра и возвращает её продюсер. Не вызывает
+        тяжёлый `producer.stop()` — это надо сделать вызывающему коду
+        (например, в фоновой задаче), чтобы не блокировать API.
+        """
         with self._lock:
             sess = self._sessions.pop(session_id, None)
         if sess is None:
-            return False
+            return None
+        self._log.info(f"Session detached: {session_id}")
+        return sess.producer
+
+    @staticmethod
+    def shutdown_producer(producer: CameraProducer, log_id: str = "") -> None:
+        """Безопасно останавливает один продюсер. Может занять до ~15 секунд."""
+        log = logging.getLogger("SessionManager")
         try:
-            sess.producer.stop()
+            producer.stop()
+            log.info(f"Producer stopped: {log_id}")
         except Exception as e:
-            self._log.warning(f"Error stopping {session_id}: {e}")
-        self._log.info(f"Session stopped: {session_id}")
+            log.warning(f"Error stopping producer {log_id}: {e}")
+
+    def stop(self, session_id: str) -> bool:
+        """Синхронная остановка — оставлена для совместимости (lifespan etc.)."""
+        producer = self.detach(session_id)
+        if producer is None:
+            return False
+        self.shutdown_producer(producer, session_id)
         return True
 
     def stop_all(self) -> None:

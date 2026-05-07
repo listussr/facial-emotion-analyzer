@@ -31,3 +31,7 @@ class CameraConfig:
     reconnect_timeout: int = 5
     max_width: int = 1280
     max_height: int = 720
+    # Если True — продюсер завершается, как только источник перестал отдавать
+    # кадры (конец файла). Если False — пытается переподключиться (поведение
+    # для IP-камер). Для загруженных пользователем видео ставим True.
+    stop_on_end: bool = False

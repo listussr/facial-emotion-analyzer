@@ -68,16 +68,28 @@ function dtoToSource(dto: SessionInfoDTO): StreamSource {
   } as UploadSource;
 }
 
-async function jsonFetch<T>(url: string, init?: RequestInit): Promise<T> {
-  const r = await fetch(url, {
-    ...init,
-    headers: { 'Content-Type': 'application/json', ...(init?.headers || {}) },
-  });
-  if (!r.ok) {
-    const text = await r.text().catch(() => '');
-    throw new Error(`${r.status} ${r.statusText}: ${text}`);
+async function jsonFetch<T>(url: string, init?: RequestInit, timeoutMs = 8000): Promise<T> {
+  const ctrl = new AbortController();
+  const t = window.setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const r = await fetch(url, {
+      ...init,
+      signal: ctrl.signal,
+      headers: { 'Content-Type': 'application/json', ...(init?.headers || {}) },
+    });
+    if (!r.ok) {
+      const text = await r.text().catch(() => '');
+      throw new Error(`${r.status} ${r.statusText}: ${text}`);
+    }
+    return (await r.json()) as T;
+  } catch (e: any) {
+    if (e?.name === 'AbortError') {
+      throw new Error(`Превышено время ожидания запроса (${timeoutMs} мс)`);
+    }
+    throw e;
+  } finally {
+    window.clearTimeout(t);
   }
-  return r.json() as Promise<T>;
 }
 
 export const api = {

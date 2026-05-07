@@ -156,25 +156,51 @@ class CameraProducer:
         Обработка цикла захвата видеопотока.
         """
         frame_interval = 1.0 / self.config.frame_rate
-        
+
+        # Логируем эффективную скорость продюсера каждые 100 кадров —
+        # видно, упирается ли продюсер в `frame_rate` или в свою же
+        # (encode + resize) обработку.
+        window_n = 100
+        window_t = time.time()
+        window_start_count = self.frame_count
+
         while self.is_running and self.cap and self.cap.isOpened():
             loop_start = time.time()
-            
+
             try:
                 ret, frame = self.cap.read()
                 if not ret:
-                    #logging.warning("Failed to read frame, reinitializing capture")
+                    # Конец потока. Для файлов это конец файла — корректно
+                    # завершаем продюсер, а не пытаемся «переподключиться»
+                    # к тому же файлу (это вызывало бесконечное проигрывание).
+                    if getattr(self.config, "stop_on_end", False):
+                        logging.info(
+                            f"Source exhausted ({self.config.source}); stopping producer"
+                        )
+                        self.is_running = False
                     break
-                
+
                 self._process_frame(frame)
                 self.frame_count += 1
                 self.last_frame_time = time.time()
-                
+
+                if (self.frame_count - window_start_count) >= window_n:
+                    now = time.time()
+                    dt = now - window_t
+                    fps_eff = window_n / dt if dt > 0 else 0
+                    logging.info(
+                        f"[{self.config.camera_id}] producer pushed "
+                        f"{self.frame_count} frames; effective {fps_eff:.1f} FPS "
+                        f"(target {self.config.frame_rate})"
+                    )
+                    window_t = now
+                    window_start_count = self.frame_count
+
             except Exception as e:
                 logging.error(f"Error processing frame: {e}")
                 self.error_count += 1
                 break
-            
+
             elapsed = time.time() - loop_start
             sleep_time = max(0, frame_interval - elapsed)
             if sleep_time > 0:
