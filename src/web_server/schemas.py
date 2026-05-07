@@ -46,6 +46,9 @@ class SessionInfo(BaseModel):
     config: SessionConfig
     frame_rate: int
     started_at: datetime
+    frames_sent: int = 0
+    errors: int = 0
+    fps: float = 0.0
     filename: Optional[str] = None
     duration_sec: Optional[float] = None
     file_size: Optional[int] = None

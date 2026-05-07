@@ -49,3 +49,20 @@ class KafkaIO:
             self.logger.warning("Producer queue full — dropping result")
         except Exception as e:
             self.logger.error(f"Failed to produce message: {e}")
+
+    def close(self, flush_timeout: float = 3.0) -> None:
+        """
+        Корректное закрытие Kafka-клиентов. Без этого librdkafka держит
+        фоновые потоки и процесс (особенно после Ctrl+C на Windows) висит,
+        пока ОС не отстрелит зомби.
+        """
+        try:
+            remaining = self.producer.flush(flush_timeout)
+            if remaining:
+                self.logger.warning(f"{remaining} kafka messages were not delivered")
+        except Exception:
+            self.logger.exception("Producer flush failed")
+        try:
+            self.consumer.close()
+        except Exception:
+            self.logger.exception("Consumer close failed")
