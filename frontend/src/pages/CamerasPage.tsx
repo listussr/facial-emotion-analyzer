@@ -1,15 +1,12 @@
 import { useState } from 'react';
-import { MOCK_CAMERAS } from '@/data/mock';
+import { Link } from 'react-router-dom';
 import StreamGrid from '@/components/StreamGrid';
 import GridSelector, { GridCols } from '@/components/GridSelector';
+import { useSessions } from '@/hooks/useSessions';
 
-/**
- * Сетка только живых камер. Загруженные файлы здесь не показываем —
- * они на отдельной странице /uploads.
- */
 export default function CamerasPage() {
   const [cols, setCols] = useState<GridCols>(2);
-  const cameras = MOCK_CAMERAS;
+  const { sessions, loading, error, stop } = useSessions('camera');
 
   return (
     <>
@@ -24,12 +21,31 @@ export default function CamerasPage() {
         </div>
       </div>
 
-      {cameras.length === 0 ? (
-        <div className="glass p-10 text-center text-slate-500">
-          Нет подключённых камер. Добавьте источник в разделе «Настройки».
+      {error && (
+        <div className="glass p-4 mb-4 text-sm text-rose-700">
+          Ошибка соединения с бэкендом: {error}
+        </div>
+      )}
+
+      {loading && sessions.length === 0 ? (
+        <div className="glass p-10 text-center text-slate-500">Загрузка…</div>
+      ) : sessions.length === 0 ? (
+        <div className="glass p-10 text-center">
+          <p className="text-slate-600 mb-4">
+            Нет подключённых камер. Добавьте источник в разделе настроек.
+          </p>
+          <Link to="/settings" className="btn btn-primary inline-flex">
+            Перейти в настройки
+          </Link>
         </div>
       ) : (
-        <StreamGrid sources={cameras} cols={cols} detailPathPrefix="/cameras" />
+        <StreamGrid
+          sources={sessions}
+          cols={cols}
+          detailPathPrefix="/cameras"
+          live
+          onStop={(id) => stop(id)}
+        />
       )}
 
       <p className="text-xs text-slate-500 mt-6 text-center">

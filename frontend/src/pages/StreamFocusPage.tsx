@@ -1,7 +1,9 @@
+import { useEffect, useState } from 'react';
 import { useParams, Link, useNavigate } from 'react-router-dom';
-import { MOCK_CAMERAS, MOCK_UPLOADS } from '@/data/mock';
 import StreamTile, { formatTime } from '@/components/StreamTile';
-import { EMOTION_RU, StreamSource } from '@/types';
+import { EMOTION_RU, StreamSource, Emotion } from '@/types';
+import { api } from '@/api/client';
+import { useSessionEvents } from '@/hooks/useSessionEvents';
 
 interface Props {
   kind: 'camera' | 'upload';
@@ -18,32 +20,60 @@ const MODEL_LABEL: Record<string, string> = {
 };
 
 /**
- * Развёрнутый просмотр одного потока. Открывается по клику с сетки.
- * Используется и для камер (/cameras/:id), и для загруженных видео (/uploads/:id).
+ * Развёрнутый просмотр одной сессии. Тянет данные через GET /api/sessions
+ * + WebSocket /api/events/{id} для лайв-аналитики.
  */
 export default function StreamFocusPage({ kind }: Props) {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const [source, setSource] = useState<StreamSource | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
-  const list: StreamSource[] = kind === 'camera' ? MOCK_CAMERAS : MOCK_UPLOADS;
-  const source = list.find((s) => s.id === id);
+  const back = kind === 'camera' ? '/cameras' : '/uploads';
 
-  if (!source) {
+  // Опрос данных о сессии (для статуса/имени)
+  useEffect(() => {
+    if (!id) return;
+    let alive = true;
+    const fetchOne = async () => {
+      try {
+        const list = await api.listSessions(kind);
+        if (!alive) return;
+        const s = list.find((x) => x.id === id);
+        if (!s) {
+          setError('Сессия не найдена');
+        } else {
+          setSource(s);
+          setError(null);
+        }
+      } catch (e: any) {
+        if (alive) setError(e?.message || 'fetch error');
+      }
+    };
+    fetchOne();
+    const t = window.setInterval(fetchOne, 3000);
+    return () => {
+      alive = false;
+      window.clearInterval(t);
+    };
+  }, [id, kind]);
+
+  const events = useSessionEvents(id);
+
+  if (error || !source) {
     return (
       <div className="glass p-10 text-center">
-        <h2 className="text-xl font-bold mb-2">Источник не найден</h2>
-        <p className="text-slate-600">Возможно, сессия была закрыта.</p>
-        <Link
-          to={kind === 'camera' ? '/cameras' : '/uploads'}
-          className="btn btn-primary mt-4 inline-flex"
-        >
-          Назад
-        </Link>
+        <h2 className="text-xl font-bold mb-2">{error ? error : 'Загрузка…'}</h2>
+        {error && (
+          <Link to={back} className="btn btn-primary mt-4 inline-flex">
+            Назад
+          </Link>
+        )}
       </div>
     );
   }
 
-  const back = kind === 'camera' ? '/cameras' : '/uploads';
+  const liveFaces = events.latest?.faces ?? [];
 
   return (
     <>
@@ -73,18 +103,22 @@ export default function StreamFocusPage({ kind }: Props) {
           <span className={`chip ${source.device === 'cuda' ? 'chip-on' : ''}`}>
             {source.device.toUpperCase()}
           </span>
+          <span className={`chip ${events.connected ? 'chip-ok' : 'chip-warn'}`}>
+            <span
+              className="pulse-dot"
+              style={{ background: events.connected ? '#10b981' : '#f59e0b' }}
+            />
+            {events.connected ? 'WS активен' : 'WS отключён'}
+          </span>
         </div>
       </div>
 
       <div className="grid lg:grid-cols-3 gap-6">
         <section className="lg:col-span-2 glass p-4">
-          <StreamTile source={source} />
+          <StreamTile source={source} liveSrc={api.streamUrl(source.id)} />
 
           {source.kind === 'upload' && (
             <div className="mt-4 flex items-center gap-3">
-              <button className="btn btn-primary text-sm">
-                {source.status === 'paused' ? '▶ Продолжить' : '⏸ Пауза'}
-              </button>
               <div className="flex-1">
                 <div className="h-2 rounded-full bg-indigo-100 overflow-hidden">
                   <div
@@ -106,52 +140,71 @@ export default function StreamFocusPage({ kind }: Props) {
 
         <aside className="glass p-5">
           <h3 className="font-bold mb-4">Текущие лица</h3>
-          {source.faces.length === 0 ? (
-            <p className="text-sm text-slate-500">В кадре нет лиц.</p>
+          {liveFaces.length === 0 ? (
+            <p className="text-sm text-slate-500">
+              {events.connected ? 'В кадре нет лиц.' : 'Ожидаем данные аналитики…'}
+            </p>
           ) : (
             <ul className="space-y-3">
-              {source.faces.map((f) => (
-                <li key={f.trackId} className="flex items-center gap-3">
-                  <span
-                    className="w-3 h-3 rounded-full shrink-0"
-                    style={{ background: f.color, boxShadow: `0 0 12px ${f.color}` }}
-                  />
-                  <div className="flex-1 min-w-0">
-                    <div className="font-medium text-sm">{f.faceId}</div>
-                    <div className="text-xs text-slate-500">
-                      {EMOTION_RU[f.emotion]} · уверенность {f.score.toFixed(2)} · трек #{f.trackId}
+              {liveFaces.map((f) => {
+                const emo = (f.emotion as Emotion) || 'neutral';
+                return (
+                  <li key={f.track_id} className="flex items-center gap-3">
+                    <span
+                      className="w-3 h-3 rounded-full shrink-0"
+                      style={{ background: '#7c3aed', boxShadow: '0 0 12px #7c3aed' }}
+                    />
+                    <div className="flex-1 min-w-0">
+                      <div className="font-medium text-sm">{f.face_id}</div>
+                      <div className="text-xs text-slate-500">
+                        {f.emotion ? EMOTION_RU[emo] : '—'} · трек #{f.track_id}
+                        {f.emotion_scores.length > 0 && (
+                          <> · уверенность {Math.max(...f.emotion_scores).toFixed(2)}</>
+                        )}
+                      </div>
                     </div>
-                  </div>
-                </li>
-              ))}
+                  </li>
+                );
+              })}
             </ul>
           )}
 
-          {source.kind === 'camera' && (
-            <>
-              <hr className="my-5 border-indigo-100/60" />
-              <h3 className="font-bold mb-3">Метрики</h3>
-              <ul className="space-y-2 text-sm">
-                <Metric label="FPS" value={source.fps.toFixed(1)} />
-                <Metric label="Задержка" value={`${source.latencyMs} мс`} />
-                <Metric label="Разрешение" value={source.resolution} />
-                <Metric
-                  label="Состояние"
-                  value={
-                    source.status === 'live'
-                      ? 'в эфире'
-                      : source.status === 'slow'
-                      ? 'низкий FPS'
-                      : 'отключена'
-                  }
-                />
-              </ul>
-            </>
-          )}
+          <hr className="my-5 border-indigo-100/60" />
+          <h3 className="font-bold mb-3">Метрики</h3>
+          <ul className="space-y-2 text-sm">
+            <Metric label="FPS аналитики" value={events.fps > 0 ? events.fps.toFixed(1) : '—'} />
+            <Metric label="Лиц в кадре" value={String(liveFaces.length)} />
+            <Metric label="Frame ID" value={String(events.latest?.frame_id ?? '—')} />
+            <Metric label="Состояние" value={statusLabel(source)} />
+          </ul>
         </aside>
       </div>
     </>
   );
+}
+
+function statusLabel(s: StreamSource): string {
+  if (s.kind === 'camera') {
+    return s.status === 'live'
+      ? 'в эфире'
+      : s.status === 'slow'
+      ? 'низкий FPS'
+      : s.status === 'error'
+      ? 'ошибка источника'
+      : 'отключена';
+  }
+  switch (s.status) {
+    case 'queued':
+      return 'в очереди';
+    case 'running':
+      return 'обрабатывается';
+    case 'paused':
+      return 'на паузе';
+    case 'done':
+      return 'готово';
+    default:
+      return s.status;
+  }
 }
 
 function Metric({ label, value }: { label: string; value: string }) {
