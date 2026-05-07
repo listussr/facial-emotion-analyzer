@@ -65,7 +65,7 @@ export interface SourceBase {
 export interface CameraSource extends SourceBase {
   kind: 'camera';
   url: string;
-  status: 'live' | 'offline' | 'slow';
+  status: 'live' | 'offline' | 'slow' | 'error';
 }
 
 export interface UploadSource extends SourceBase {

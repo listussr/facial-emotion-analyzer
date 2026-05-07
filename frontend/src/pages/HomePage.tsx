@@ -1,11 +1,12 @@
 import type { ReactNode } from 'react';
 import { Link } from 'react-router-dom';
-import { MOCK_CAMERAS, MOCK_UPLOADS } from '@/data/mock';
 import StreamTile from '@/components/StreamTile';
+import { useSessions } from '@/hooks/useSessions';
+import { api } from '@/api/client';
 
 export default function HomePage() {
-  const camerasPreview = MOCK_CAMERAS.slice(0, 3);
-  const uploadsPreview = MOCK_UPLOADS.slice(0, 3);
+  const cameras = useSessions('camera');
+  const uploads = useSessions('upload');
 
   return (
     <>
@@ -22,10 +23,10 @@ export default function HomePage() {
             <span className="text-gradient">В реальном времени.</span>
           </h1>
           <p className="mt-5 text-lg text-slate-600 max-w-2xl">
-            Affectra — это локальная система, которая обнаруживает, отслеживает, идентифицирует
-            и считывает эмоции каждого лица в видеопотоке или загруженном файле. Подбирайте
-            алгоритмы под своё железо, выбирайте удобную сетку отображения и наблюдайте, как
-            оживают данные.
+            Affectra — это локальная система, которая обнаруживает, отслеживает,
+            идентифицирует и считывает эмоции каждого лица в видеопотоке или загруженном файле.
+            Подбирайте алгоритмы под своё железо, выбирайте удобную сетку отображения и
+            наблюдайте, как оживают данные.
           </p>
           <div className="mt-7 flex flex-wrap gap-3">
             <Link to="/cameras" className="btn btn-primary">
@@ -49,17 +50,17 @@ export default function HomePage() {
           title="Активные камеры"
           link="/cameras"
           linkText="Все камеры →"
-          empty={camerasPreview.length === 0}
+          empty={cameras.sessions.length === 0}
         >
-          {camerasPreview.map((c) => (
+          {cameras.sessions.slice(0, 3).map((c) => (
             <Link key={c.id} to={`/cameras/${c.id}`} className="glass p-3 block hover:scale-[1.01] transition-transform">
               <div className="mb-2 flex items-center justify-between">
                 <span className="font-semibold text-sm">{c.name}</span>
                 <span className="text-[11px] text-slate-500 font-mono">
-                  {c.fps.toFixed(1)} FPS
+                  {c.kind === 'camera' ? c.status : ''}
                 </span>
               </div>
-              <StreamTile source={c} hideLabels />
+              <StreamTile source={c} liveSrc={api.streamUrl(c.id)} hideLabels />
             </Link>
           ))}
         </PreviewBlock>
@@ -68,17 +69,19 @@ export default function HomePage() {
           title="Обрабатываемые видео"
           link="/uploads"
           linkText="Все видео →"
-          empty={uploadsPreview.length === 0}
+          empty={uploads.sessions.length === 0}
         >
-          {uploadsPreview.map((u) => (
+          {uploads.sessions.slice(0, 3).map((u) => (
             <Link key={u.id} to={`/uploads/${u.id}`} className="glass p-3 block hover:scale-[1.01] transition-transform">
               <div className="mb-2 flex items-center justify-between">
-                <span className="font-semibold text-sm truncate">{u.filename}</span>
+                <span className="font-semibold text-sm truncate">
+                  {u.kind === 'upload' ? u.filename : u.name}
+                </span>
                 <span className="text-[11px] text-slate-500 font-mono shrink-0">
-                  {Math.round(u.progress * 100)}%
+                  {u.kind === 'upload' ? `${Math.round(u.progress * 100)}%` : ''}
                 </span>
               </div>
-              <StreamTile source={u} hideLabels />
+              <StreamTile source={u} liveSrc={api.streamUrl(u.id)} hideLabels />
             </Link>
           ))}
         </PreviewBlock>
