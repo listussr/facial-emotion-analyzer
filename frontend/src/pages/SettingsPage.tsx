@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { useSessions } from '@/hooks/useSessions';
 import { api } from '@/api/client';
 import Toggle from '@/components/Toggle';
+import { useUiPrefs } from '@/hooks/useUiPrefs';
 import type { TrackerName, EmotionModel, Device } from '@/types';
 
 const TRACKER_LABEL: Record<TrackerName, string> = { deepsort: 'DeepSORT', bytetrack: 'ByteTrack' };
@@ -14,19 +15,28 @@ const MODEL_LABEL: Record<string, string> = {
 
 export default function SettingsPage() {
   const { sessions, error: listError, stop, refresh } = useSessions('camera');
+  const { prefs, update: updatePrefs } = useUiPrefs();
 
   const [name, setName] = useState('');
   const [source, setSource] = useState('');
   const [frameRate, setFrameRate] = useState(20);
-  const [tracker, setTracker] = useState<TrackerName>('deepsort');
+  const [frameRateError, setFrameRateError] = useState<string | null>(null);
+  const [tracker, setTracker] = useState<TrackerName>('bytetrack');
   const [model, setModel] = useState<EmotionModel>('resnet-18');
   const [device, setDevice] = useState<Device>('cpu');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const FPS_MIN = 1;
+  const FPS_MAX = 120;
+
   async function addCamera() {
     if (!name.trim() || !source.trim()) {
       setError('Укажите имя и источник');
+      return;
+    }
+    if (frameRateError) {
+      setError(frameRateError);
       return;
     }
     setBusy(true);
@@ -148,8 +158,21 @@ export default function SettingsPage() {
                 className="field"
                 type="number"
                 value={frameRate}
-                onChange={(e) => setFrameRate(Number(e.target.value) || 20)}
+                onChange={(e) => {
+                  const val = Number(e.target.value);
+                  setFrameRate(val);
+                  if (!Number.isFinite(val) || val < FPS_MIN || val > FPS_MAX) {
+                    setFrameRateError(
+                      `Допустимый диапазон: ${FPS_MIN}–${FPS_MAX} кадров/сек`
+                    );
+                  } else {
+                    setFrameRateError(null);
+                  }
+                }}
               />
+              {frameRateError && (
+                <div className="text-xs text-rose-700 mt-1">{frameRateError}</div>
+              )}
             </div>
             <div>
               <div className="label mb-1">Устройство вычислений</div>
@@ -187,6 +210,24 @@ export default function SettingsPage() {
             Per-session маршрутизация — следующий этап.
           </p>
           <div className="space-y-4">
+            <div>
+              <div className="label mb-1">
+                Похожих лиц при поиске{' '}
+                <span className="text-slate-400">(на странице «История»)</span>
+              </div>
+              <input
+                className="field"
+                type="number"
+                value={prefs.searchTopK}
+                onChange={(e) => updatePrefs({ searchTopK: Number(e.target.value) })}
+              />
+              {(prefs.searchTopK < 1 || prefs.searchTopK > 50 || !Number.isFinite(prefs.searchTopK)) && (
+                <div className="text-xs text-rose-700 mt-1">
+                  Допустимый диапазон: 1–50
+                </div>
+              )}
+            </div>
+            <hr className="border-indigo-100/60" />
             <div className="flex items-center justify-between">
               <div>
                 <div className="font-medium">Сохранять аннотированный поток</div>

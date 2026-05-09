@@ -1,5 +1,6 @@
-from typing import Union
+from typing import Any, Dict, Union
 import uuid
+import json
 import numpy as np
 import logging
 from PIL import Image
@@ -79,4 +80,40 @@ class FacesDBHandler(AbstractDBHandler):
                 return None
         except Exception as e:
             logging.error(f"Error during fetching from faces database: {e}")
+            raise
+
+    def insert_emotion_timeseries(self, user_id: str, payload: Dict[str, Any]) -> None:
+        """
+        Записать таймсерию эмоций для пользователя.
+
+        :param user_id: UUID пользователя из таблицы face_embeddings.
+        :type user_id: str
+        :param payload: Словарь с данными — пишется в JSONB-колонку как есть.
+            Ожидаемая структура:
+                {
+                    "camera_id": str,
+                    "track_id": int,
+                    "started_at": float (unix ts),
+                    "ended_at":   float (unix ts),
+                    "samples": [{"t": float, "label": str, "scores": [..8..]}, ...]
+                }
+        :type payload: Dict[str, Any]
+        """
+        try:
+            query = """
+                INSERT INTO emotion_timeseries (user_id, data)
+                VALUES (%s, %s)
+            """
+            self._cursor.execute(query, (user_id, json.dumps(payload, ensure_ascii=False)))
+            self._conn.commit()
+            logging.info(
+                f"Inserted emotion timeseries for user {user_id}: "
+                f"{len(payload.get('samples', []))} samples"
+            )
+        except Exception:
+            logging.exception("Error inserting emotion timeseries")
+            try:
+                self._conn.rollback()
+            except Exception:
+                pass
             raise

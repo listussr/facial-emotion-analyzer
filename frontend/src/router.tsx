@@ -6,6 +6,8 @@ import UploadsPage from './pages/UploadsPage';
 import SettingsPage from './pages/SettingsPage';
 import AboutPage from './pages/AboutPage';
 import StreamFocusPage from './pages/StreamFocusPage';
+import HistoryPage from './pages/HistoryPage';
+import UserHistoryPage from './pages/UserHistoryPage';
 
 export const router = createBrowserRouter([
   {
@@ -17,6 +19,8 @@ export const router = createBrowserRouter([
       { path: 'cameras/:id', element: <StreamFocusPage kind="camera" /> },
       { path: 'uploads', element: <UploadsPage /> },
       { path: 'uploads/:id', element: <StreamFocusPage kind="upload" /> },
+      { path: 'history', element: <HistoryPage /> },
+      { path: 'history/:userId', element: <UserHistoryPage /> },
       { path: 'settings', element: <SettingsPage /> },
       { path: 'about', element: <AboutPage /> },
     ],

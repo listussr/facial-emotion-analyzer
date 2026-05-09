@@ -70,17 +70,27 @@ class _Session:
                 status = "error"
             else:
                 status = "done"
-        # Метрики из продюсера (если он умеет их давать)
+
         frames_sent = int(getattr(self.producer, "frame_count", 0) or 0)
         errors = int(getattr(self.producer, "error_count", 0) or 0)
         fps = 0.0
+        progress = 0.0
+        position_sec = 0.0
+        duration_sec = None
         try:
             stats_fn = getattr(self.producer, "get_stats", None)
             if callable(stats_fn):
-                stats = stats_fn()
-                fps = float(stats.get("current_fps", 0.0)) if stats else 0.0
+                stats = stats_fn() or {}
+                fps = float(stats.get("current_fps") or 0.0)
+                progress = float(stats.get("progress") or 0.0)
+                position_sec = float(stats.get("position_sec") or 0.0)
+                vd = stats.get("video_duration_sec")
+                duration_sec = float(vd) if vd is not None else None
         except Exception:
             pass
+
+        if self.kind == "upload" and status == "done" and progress == 0.0 and frames_sent > 0:
+            progress = 1.0
 
         return SessionInfo(
             id=self.id,
@@ -94,7 +104,10 @@ class _Session:
             frames_sent=frames_sent,
             errors=errors,
             fps=fps,
+            progress=progress,
+            position_sec=position_sec,
             filename=self.filename,
+            duration_sec=duration_sec,
             file_size=self.file_size,
         )
 

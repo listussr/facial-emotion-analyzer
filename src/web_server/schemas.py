@@ -49,6 +49,8 @@ class SessionInfo(BaseModel):
     frames_sent: int = 0
     errors: int = 0
     fps: float = 0.0
+    progress: float = 0.0
+    position_sec: float = 0.0
     filename: Optional[str] = None
     duration_sec: Optional[float] = None
     file_size: Optional[int] = None
@@ -59,6 +61,7 @@ class UploadInfo(BaseModel):
     filename: str
     size: int
     saved_path: str
+    uploaded_at: Optional[float] = None
 
 
 class HealthInfo(BaseModel):

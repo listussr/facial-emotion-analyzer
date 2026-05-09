@@ -11,10 +11,12 @@ from .routes import sessions as sessions_routes
 from .routes import streams as streams_routes
 from .routes import uploads as uploads_routes
 from .routes import events as events_routes
+from .routes import history as history_routes
 from .schemas import HealthInfo
 from .services.session_manager import session_manager
 from .services.stream_dispatcher import stream_dispatcher
 from .services.events_dispatcher import events_dispatcher
+from .services import db as db_service
 
 setup_logger("webserver", json_format=False)
 log = logging.getLogger("webserver")
@@ -23,6 +25,7 @@ log = logging.getLogger("webserver")
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     log.info("Starting web server services")
+    db_service.init_pool()
     await stream_dispatcher.start()
     await events_dispatcher.start()
     try:
@@ -32,6 +35,7 @@ async def lifespan(_: FastAPI):
         session_manager.stop_all()
         await stream_dispatcher.stop()
         await events_dispatcher.stop()
+        db_service.close_pool()
 
 
 app = FastAPI(
@@ -53,6 +57,7 @@ app.include_router(sessions_routes.router)
 app.include_router(uploads_routes.router)
 app.include_router(streams_routes.router)
 app.include_router(events_routes.router)
+app.include_router(history_routes.router)
 
 
 @app.get("/api/health", response_model=HealthInfo, tags=["meta"])

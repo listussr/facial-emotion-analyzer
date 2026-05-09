@@ -76,7 +76,9 @@ export default function StreamGrid({
                   ? s.fps > 0
                     ? `${s.fps.toFixed(1)} FPS · ${s.resolution}`
                     : s.status
-                  : `${Math.round(s.progress * 100)}%`}
+                  : `${s.fps > 0 ? `${s.fps.toFixed(1)} FPS · ` : ''}${Math.round(
+                      s.progress * 100
+                    )}%`}
               </span>
             </header>
 
