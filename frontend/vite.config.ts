@@ -12,9 +12,16 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
-      // Прокси к будущему FastAPI backend на :8000
+      // HTTP-эндпоинты FastAPI
       '/api': {
         target: 'http://localhost:8000',
+        changeOrigin: true,
+      },
+      // WebSocket-канал событий аналитики (без ws:true Vite не делает upgrade,
+      // и фронт мгновенно ловит close → «WS отключён»).
+      '/api/events': {
+        target: 'ws://localhost:8000',
+        ws: true,
         changeOrigin: true,
       },
     },

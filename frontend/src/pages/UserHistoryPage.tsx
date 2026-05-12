@@ -4,6 +4,9 @@ import { api } from '@/api/client';
 import { TrackHistory, UserHistoryDetail } from '@/types';
 import EmotionBars from '@/components/EmotionBars';
 import EmotionTimeline from '@/components/EmotionTimeline';
+import EmotionLines from '@/components/charts/EmotionLines';
+import EmotionAreaChart from '@/components/charts/EmotionAreaChart';
+import EmotionRadar from '@/components/charts/EmotionRadar';
 
 export default function UserHistoryPage() {
   const { userId } = useParams<{ userId: string }>();
@@ -63,6 +66,19 @@ export default function UserHistoryPage() {
             <p className="text-sm text-slate-500 font-mono">{data.user_id}</p>
           </div>
         </div>
+        <a
+          href={api.userExportCsvUrl(data.user_id)}
+          download
+          className="btn btn-ghost text-sm"
+          title="Экспортировать все сэмплы в CSV"
+        >
+          <svg width={16} height={16} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+            <polyline points="7 10 12 15 17 10" />
+            <line x1="12" y1="15" x2="12" y2="3" />
+          </svg>
+          Скачать CSV
+        </a>
       </div>
 
       <div className="grid lg:grid-cols-3 gap-6">
@@ -126,6 +142,17 @@ export default function UserHistoryPage() {
             <ZoomedTimeline data={data} range={range} />
           </div>
         )}
+      </section>
+
+      {/* Подробные графики вероятностей — учитывают выделенный диапазон */}
+      <section className="glass p-5 mt-6">
+        <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
+          <h3 className="font-bold text-lg">Графики вероятностей</h3>
+          {range && (
+            <span className="chip chip-on text-[11px]">в выделенном окне</span>
+          )}
+        </div>
+        <ChartSwitcher tracks={data.tracks} range={range} />
       </section>
 
       <section className="glass p-5 mt-6">
@@ -226,18 +253,69 @@ function TrackRow({ track }: { track: TrackHistory }) {
         <span className="chip">{track.samples.length} сэмплов</span>
       </button>
       {open && (
-        <div className="mt-3 grid lg:grid-cols-2 gap-5">
-          <div>
-            <h4 className="font-semibold mb-2 text-sm">Распределение эмоций</h4>
-            <EmotionBars counts={counts} total={track.samples.length || 1} />
+        <>
+          <div className="mt-3 grid lg:grid-cols-2 gap-5">
+            <div>
+              <h4 className="font-semibold mb-2 text-sm">Распределение эмоций</h4>
+              <EmotionBars counts={counts} total={track.samples.length || 1} />
+            </div>
+            <div>
+              <h4 className="font-semibold mb-2 text-sm">Таймлайн трека</h4>
+              <EmotionTimeline tracks={[track]} height={70} hideLegend />
+            </div>
           </div>
-          <div>
-            <h4 className="font-semibold mb-2 text-sm">Таймлайн трека</h4>
-            <EmotionTimeline tracks={[track]} height={70} hideLegend />
+          <div className="mt-4">
+            <h4 className="font-semibold mb-2 text-sm">Графики вероятностей</h4>
+            <ChartSwitcher tracks={[track]} range={null} />
           </div>
-        </div>
+        </>
       )}
     </li>
+  );
+}
+
+type ChartKind = 'lines' | 'area' | 'radar';
+
+const CHART_TABS: { value: ChartKind; label: string; hint: string }[] = [
+  { value: 'lines', label: 'Линии', hint: 'Вероятности каждой эмоции во времени' },
+  { value: 'area',  label: 'Области', hint: 'Стэкированные вероятности по моментам' },
+  { value: 'radar', label: 'Профиль', hint: 'Средние вероятности (polar)' },
+];
+
+function ChartSwitcher({
+  tracks,
+  range,
+}: {
+  tracks: TrackHistory[];
+  range: [number, number] | null;
+}) {
+  const [kind, setKind] = useState<ChartKind>('lines');
+  return (
+    <>
+      <div className="seg mb-4">
+        {CHART_TABS.map((t) => (
+          <button
+            key={t.value}
+            type="button"
+            className={kind === t.value ? 'active' : ''}
+            onClick={() => setKind(t.value)}
+            title={t.hint}
+          >
+            {t.label}
+          </button>
+        ))}
+      </div>
+      {kind === 'lines' && <EmotionLines tracks={tracks} range={range} />}
+      {kind === 'area' && <EmotionAreaChart tracks={tracks} range={range} />}
+      {kind === 'radar' && (
+        <div className="flex justify-center">
+          <EmotionRadar tracks={tracks} range={range} />
+        </div>
+      )}
+      <p className="text-xs text-slate-500 mt-3">
+        {CHART_TABS.find((t) => t.value === kind)?.hint}
+      </p>
+    </>
   );
 }
 

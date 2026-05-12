@@ -135,6 +135,13 @@ export const api = {
     if (!r.ok) throw new Error(`Failed to stop ${id}`);
   },
 
+  async stopAllSessions(kind?: 'camera' | 'upload'): Promise<{ stopped: string[]; count: number }> {
+    const q = kind ? `?kind=${kind}` : '';
+    const r = await fetch(`/api/sessions${q}`, { method: 'DELETE' });
+    if (!r.ok) throw new Error(await r.text());
+    return r.json();
+  },
+
   async uploadFile(file: File): Promise<{
     upload_id: string;
     filename: string;
@@ -216,5 +223,13 @@ export const api = {
 
   async sessionHistory(sessionId: string): Promise<SessionHistoryDetail> {
     return jsonFetch<SessionHistoryDetail>(`/api/history/sessions/${sessionId}`);
+  },
+
+  userExportCsvUrl(userId: string): string {
+    return `/api/history/users/${userId}/export.csv`;
+  },
+
+  sessionExportCsvUrl(sessionId: string): string {
+    return `/api/history/sessions/${sessionId}/export.csv`;
   },
 };

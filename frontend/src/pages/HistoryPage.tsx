@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '@/api/client';
 import { useUiPrefs } from '@/hooks/useUiPrefs';
@@ -22,6 +22,20 @@ export default function HistoryPage() {
   const [matches, setMatches] = useState<SearchMatch[] | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [dbUsersCount, setDbUsersCount] = useState<number | null>(null);
+
+  // Узнаём, есть ли вообще что-то в базе лиц. Если нет — показываем пустое
+  // состояние с инструкцией, что делать дальше, чтобы поиск был осмысленным.
+  useEffect(() => {
+    let alive = true;
+    api
+      .listUsers()
+      .then((u) => alive && setDbUsersCount(u.length))
+      .catch(() => alive && setDbUsersCount(null));
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   function pickFile(f: File | null) {
     setFile(f);
@@ -59,6 +73,27 @@ export default function HistoryPage() {
           </p>
         </div>
       </div>
+
+      {dbUsersCount === 0 && (
+        <div className="glass p-6 mb-6 text-center">
+          <div
+            className="mx-auto w-12 h-12 rounded-full flex items-center justify-center mb-3"
+            style={{ background: 'rgba(99,102,241,0.12)', color: '#4338ca' }}
+          >
+            <svg width={22} height={22} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+              <circle cx="12" cy="8" r="4" />
+              <path d="M6 21v-2a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v2" />
+            </svg>
+          </div>
+          <h3 className="font-bold text-lg">База лиц пуста</h3>
+          <p className="text-sm text-slate-600 max-w-md mx-auto mt-1">
+            Чтобы здесь появились распознанные люди, обработайте видео на
+            странице <Link to="/uploads" className="text-indigo-700 font-medium">Видео</Link>{' '}
+            или подключите камеру в{' '}
+            <Link to="/settings" className="text-indigo-700 font-medium">Настройках</Link>.
+          </p>
+        </div>
+      )}
 
       <div className="grid md:grid-cols-3 gap-6 mb-6">
         <section className="glass p-6 md:col-span-2">

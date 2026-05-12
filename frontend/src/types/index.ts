@@ -5,7 +5,12 @@ export type EmotionModel =
   | 'resnet-50'
   | 'resnet-50-int8'
   | 'convnext'
-  | 'convnext-int8';
+  | 'convnext-int8'
+  | 'convnext-gelu'
+  | 'efficientnet-b3'
+  | 'efficientnet-b3-int8'
+  | 'swin-tiny'
+  | 'swin-tiny-int8';
 export type Device = 'cpu' | 'cuda';
 
 export type Emotion =

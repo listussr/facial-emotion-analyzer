@@ -309,6 +309,18 @@ class CameraProducer:
         Returns:
             dict: <i>Словарь для отправки в кафку.</i>
         """
+        session_config = None
+        if (
+            self.config.tracker_name
+            or self.config.emotion_model
+            or self.config.compute_device
+        ):
+            session_config = {
+                'tracker': self.config.tracker_name,
+                'model': self.config.emotion_model,
+                'device': self.config.compute_device,
+            }
+
         return msgpack.packb({
             'camera_id': self.config.camera_id,
             'frame_id': str(frame_id),
@@ -320,7 +332,8 @@ class CameraProducer:
             'original_height': original_frame.shape[0],
             'quality': self.config.quality,
             'frame_rate': self.config.frame_rate,
-            'format': 'jpeg'
+            'format': 'jpeg',
+            'session_config': session_config,
         })
 
     def _send_to_kafka(self, message: bytes) -> None:

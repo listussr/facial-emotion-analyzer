@@ -6,20 +6,13 @@ import { EMOTION_RU, StreamSource, Emotion, SessionHistoryDetail, TrackHistory }
 import { api } from '@/api/client';
 import { useSessionEvents } from '@/hooks/useSessionEvents';
 import { useLiveFaceStats, FaceStats } from '@/hooks/useLiveFaceStats';
+import { MODEL_LABEL } from '@/data/models';
 
 interface Props {
   kind: 'camera' | 'upload';
 }
 
 const TRACKER_LABEL = { deepsort: 'DeepSORT', bytetrack: 'ByteTrack' } as const;
-const MODEL_LABEL: Record<string, string> = {
-  'resnet-18': 'ResNet-18 (FP32)',
-  'resnet-18-int8': 'ResNet-18 (INT8)',
-  'resnet-50': 'ResNet-50 (FP32)',
-  'resnet-50-int8': 'ResNet-50 (INT8)',
-  convnext: 'ConvNeXt',
-  'convnext-int8': 'ConvNeXt (INT8)',
-};
 
 /**
  * Развёрнутый просмотр одной сессии. Тянет данные через GET /api/sessions
@@ -253,16 +246,33 @@ export default function StreamFocusPage({ kind }: Props) {
         <section className="glass p-5 mt-6">
           <header className="flex items-center justify-between mb-4 flex-wrap gap-2">
             <h3 className="font-bold text-lg">Статистика по лицам</h3>
-            <div className="text-xs text-slate-500 font-mono flex flex-wrap gap-3">
-              <span>
-                WS:{' '}
-                <span style={{ color: events.connected ? '#10b981' : '#dc2626' }}>
-                  {events.connected ? 'активен' : 'отключён'}
+            <div className="flex items-center gap-3 flex-wrap">
+              <div className="text-xs text-slate-500 font-mono flex flex-wrap gap-3">
+                <span>
+                  WS:{' '}
+                  <span style={{ color: events.connected ? '#10b981' : '#dc2626' }}>
+                    {events.connected ? 'активен' : 'отключён'}
+                  </span>
                 </span>
-              </span>
-              <span>в кадре: {faceStats.length}</span>
-              {dbHistory && (
-                <span>в БД: {dbHistory.tracks_count} треков · {dbHistory.unique_users} лиц</span>
+                <span>в кадре: {faceStats.length}</span>
+                {dbHistory && (
+                  <span>в БД: {dbHistory.tracks_count} треков · {dbHistory.unique_users} лиц</span>
+                )}
+              </div>
+              {dbHistory && dbHistory.tracks_count > 0 && (
+                <a
+                  href={api.sessionExportCsvUrl(source.id)}
+                  download
+                  className="btn btn-ghost text-xs py-1 px-2"
+                  title="Экспортировать сэмплы сессии в CSV"
+                >
+                  <svg width={14} height={14} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                    <polyline points="7 10 12 15 17 10" />
+                    <line x1="12" y1="15" x2="12" y2="3" />
+                  </svg>
+                  CSV
+                </a>
               )}
             </div>
           </header>

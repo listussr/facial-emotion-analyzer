@@ -10,26 +10,59 @@ from torchvision import transforms
 from PIL import Image
 import onnxruntime as ort
 
-_data_transforms = transforms.Compose([
-    transforms.Resize(224),
-    transforms.ToTensor(),
-    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-])
-
 _MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
 _STD  = np.array([0.229, 0.224, 0.225], dtype=np.float32)
 
+
+def _build_transforms(input_size: int):
+    """Стандартный ImageNet-препроцессор torchvision с заданным размером входа."""
+    return transforms.Compose([
+        transforms.Resize((input_size, input_size)),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+    ])
+
+
+_CUDA_INPUT_SIZE: dict = {
+    "resnet-18":          224,
+    "resnet-50":          224,
+    "convnext":           224,
+    "convnext-gelu":      224,
+    "swin-tiny":          224,
+    "efficientnet-b3":    300,
+}
+
+
+def _resolve_input_size_for_cuda(model: str) -> int:
+    """Размер входа модели для CUDA-варианта; INT8 суффикс игнорируем."""
+    base = model.replace("-int8", "")
+    return _CUDA_INPUT_SIZE.get(base, 224)
+
+_MODELS_DIR = r'src\frames_processing\processing\emotion_recognition\models'
+
 _models_pathes = {
-    'cuda=resnet-18': r'src\frames_processing\processing\emotion_recognition\models\resnet_18.pth',
-    'cpu=resnet-18': r'src\frames_processing\processing\emotion_recognition\models\resnet_18.onnx',
-    'cpu=resnet-18-int8': r'src\frames_processing\processing\emotion_recognition\models\resnet_18.int8.onnx',
-    # TODO - добавить модели
-    'cuda=resnet-50': r'src\frames_processing\processing\emotion_recognition\models\resnet_18.pth',
-    'cpu=resnet-50': r'src\frames_processing\processing\emotion_recognition\models\resnet_18.onnx',
-    'cpu=resnet-50-int8': r'src\frames_processing\processing\emotion_recognition\models\resnet_50.int8.onnx',
-    'cuda=convnext': r'src\frames_processing\processing\emotion_recognition\models\resnet_18.pth',
-    'cpu=convnext': r'src\frames_processing\processing\emotion_recognition\models\resnet_18.onnx',
-    'cpu=convnext-int8': r'src\frames_processing\processing\emotion_recognition\models\convnext.int8.onnx',
+    'cuda=resnet-18':           rf'{_MODELS_DIR}\resnet_18.pth',
+    'cpu=resnet-18':            rf'{_MODELS_DIR}\resnet_18.onnx',
+    'cpu=resnet-18-int8':       rf'{_MODELS_DIR}\resnet_18.int8.onnx',
+
+    'cuda=resnet-50':           rf'{_MODELS_DIR}\resnet_50.pth',
+    'cpu=resnet-50':            rf'{_MODELS_DIR}\resnet_50.onnx',
+    'cpu=resnet-50-int8':       rf'{_MODELS_DIR}\resnet_50.int8.onnx',
+
+    'cuda=convnext':            rf'{_MODELS_DIR}\convnext_basic.pth',
+    'cpu=convnext':             rf'{_MODELS_DIR}\convnext_basic.onnx',
+    'cpu=convnext-int8':        rf'{_MODELS_DIR}\convnext_basic.int8.onnx',
+
+    'cuda=convnext-gelu':       rf'{_MODELS_DIR}\convnext_gelu_head.pth',
+    'cpu=convnext-gelu':        rf'{_MODELS_DIR}\convnext_gelu_head.onnx',
+
+    'cuda=efficientnet-b3':     rf'{_MODELS_DIR}\efficientnet_b3.pth',
+    'cpu=efficientnet-b3':      rf'{_MODELS_DIR}\efficientnet_b3.onnx',
+    'cpu=efficientnet-b3-int8': rf'{_MODELS_DIR}\efficientnet_b3.int8.onnx',
+
+    'cuda=swin-tiny':           rf'{_MODELS_DIR}\swin_tiny.pth',
+    'cpu=swin-tiny':            rf'{_MODELS_DIR}\swin_tiny.onnx',
+    'cpu=swin-tiny-int8':       rf'{_MODELS_DIR}\swin_tiny.int8.onnx',
 }
 
 
@@ -117,9 +150,18 @@ class _RecognizerCuda(_Recognizer):
     """
     Распознаватель с использованием GPU от NVIDIA.
     """
-    def __init__(self, model_path: str):
+    def __init__(self, model_path: str, input_size: int = 224):
+        # Импорт кастомных классов (EfficientNet-B3 и т.п.) — регистрирует их
+        # в `__main__` для unpickle через torch.load.
+        from . import _custom_models  # noqa: F401
+
         self._set_device()
         self._set_model(model_path)
+        self._input_size = input_size
+        self._transform = _build_transforms(input_size)
+        logging.info(
+            f"EmotionRecognizer loaded model to CUDA, input_size={input_size}"
+        )
 
     def _set_device(self) -> None:
         if not torch.cuda.is_available():
@@ -133,7 +175,7 @@ class _RecognizerCuda(_Recognizer):
 
     def _preprocess_one(self, image: np.ndarray) -> torch.Tensor:
         pil_image = Image.fromarray(image.astype('uint8'))
-        return _data_transforms(pil_image)
+        return self._transform(pil_image)
 
     def predict(self, images: ImageOrBatch) -> np.ndarray:
         """
@@ -171,10 +213,21 @@ class _RecognizerCPU(_Recognizer):
         self._session = _build_cpu_session(model_path, num_threads=num_threads)
         self._input_name = self._session.get_inputs()[0].name
 
-    @staticmethod
-    def _preprocess_one(image: np.ndarray) -> np.ndarray:
+        shape = self._session.get_inputs()[0].shape
+        def _as_int(v, default):
+            return v if isinstance(v, int) and v > 0 else default
+        if len(shape) == 4:
+            self._input_h = _as_int(shape[2], 224)
+            self._input_w = _as_int(shape[3], 224)
+        else:
+            self._input_h = self._input_w = 224
+        logging.info(
+            f"ONNX session ready: input={self._input_h}x{self._input_w}"
+        )
+
+    def _preprocess_one(self, image: np.ndarray) -> np.ndarray:
         img = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        img = cv2.resize(img, (224, 224), interpolation=cv2.INTER_LINEAR)
+        img = cv2.resize(img, (self._input_w, self._input_h), interpolation=cv2.INTER_LINEAR)
         img = img.astype(np.float32) / 255.0
         img = (img - _MEAN) / _STD
         return img.transpose(2, 0, 1)
@@ -199,9 +252,12 @@ class _RecognizerCPU(_Recognizer):
 
 
 _ModelName = Literal[
-    'resnet-18', 'resnet-18-int8',
-    'resnet-50', 'resnet-50-int8',
-    'convnext',  'convnext-int8',
+    'resnet-18',         'resnet-18-int8',
+    'resnet-50',         'resnet-50-int8',
+    'convnext',          'convnext-int8',
+    'convnext-gelu',
+    'efficientnet-b3',   'efficientnet-b3-int8',
+    'swin-tiny',         'swin-tiny-int8',
 ]
 
 
@@ -234,4 +290,7 @@ class EmotionRecognizer(object):
             )
         if device == 'cpu':
             return _RecognizerCPU(_models_pathes[key], num_threads=num_threads)
-        return _RecognizerCuda(_models_pathes[key])
+        return _RecognizerCuda(
+            _models_pathes[key],
+            input_size=_resolve_input_size_for_cuda(model),
+        )

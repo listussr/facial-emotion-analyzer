@@ -172,6 +172,9 @@ class SessionManager:
             max_message_size=5_000_000,
             reconnect_timeout=5,
             stop_on_end=(kind == "upload"),
+            tracker_name=config.tracker,
+            emotion_model=config.model,
+            compute_device=config.device,
         )
         producer = CameraProducer(cam_cfg)
         producer.start()

@@ -47,3 +47,20 @@ async def stop_session(session_id: str, bg: BackgroundTasks):
         raise HTTPException(status_code=404, detail="Session not found")
     bg.add_task(session_manager.shutdown_producer, producer, session_id)
     return {"ok": True, "stopped": session_id}
+
+
+@router.delete("")
+async def stop_all_sessions(bg: BackgroundTasks, kind: Optional[SessionKind] = Query(default=None)):
+    """
+    Останавливает все активные сессии (опционально — только определённого
+    типа). Производит то же, что и DELETE на каждую — снимает их из реестра
+    синхронно, останавливает продюсеров в фоне.
+    """
+    sessions = session_manager.list(kind=kind)
+    stopped: List[str] = []
+    for s in sessions:
+        producer = session_manager.detach(s.id)
+        if producer is not None:
+            bg.add_task(session_manager.shutdown_producer, producer, s.id)
+            stopped.append(s.id)
+    return {"ok": True, "stopped": stopped, "count": len(stopped)}

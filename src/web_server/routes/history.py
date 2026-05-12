@@ -1,13 +1,22 @@
+import csv
+import io
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, File, HTTPException, Query, UploadFile
-from fastapi.responses import Response
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 
 from ..services.db import get_cursor
 from ..services.face_search import face_search
 
 router = APIRouter(prefix="/api/history", tags=["history"])
+
+# Стандартный порядок эмоций — тот же, что в emotion_smoothing
+EMOTION_LABELS = (
+    "anger", "contempt", "disgust", "fear",
+    "happy", "neutral", "sad", "surprise",
+)
 
 
 class UserSummary(BaseModel):
@@ -251,4 +260,89 @@ def session_history(session_id: str):
         unique_users=unique_users,
         label_counts=label_counts,
         tracks=tracks,
+    )
+
+def _csv_iter_for_tracks(rows: List[Dict[str, Any]]):
+    buf = io.StringIO()
+    w = csv.writer(buf, lineterminator="\n")
+
+    header = [
+        "user_id", "camera_id", "track_id",
+        "created_at", "sample_ts", "sample_iso",
+        "label", "top_score",
+        *EMOTION_LABELS,
+    ]
+    w.writerow(header)
+    yield buf.getvalue()
+    buf.seek(0); buf.truncate(0)
+
+    for r in rows:
+        data = r.get("data") or {}
+        created_at = r.get("created_at")
+        created_iso = created_at.isoformat() if created_at else ""
+        user_id = r.get("user_id") or ""
+        camera_id = data.get("camera_id") or ""
+        track_id = data.get("track_id")
+        for s in (data.get("samples") or []):
+            scores = s.get("scores") or []
+            top_score = max(scores) if scores else ""
+            ts = s.get("t")
+            try:
+                iso_ts = datetime.fromtimestamp(ts, tz=timezone.utc).isoformat() if ts else ""
+            except Exception:
+                iso_ts = ""
+            row = [
+                user_id, camera_id, track_id,
+                created_iso, ts, iso_ts,
+                s.get("label") or "", top_score,
+                *([round(float(x), 4) for x in scores] + [""] * max(0, len(EMOTION_LABELS) - len(scores))),
+            ]
+            w.writerow(row)
+            yield buf.getvalue()
+            buf.seek(0); buf.truncate(0)
+
+
+@router.get("/users/{user_id}/export.csv")
+def export_user_csv(user_id: str):
+    """CSV со всеми сэмплами эмоций конкретного пользователя."""
+    with get_cursor() as cur:
+        cur.execute(
+            """
+            SELECT user_id::text AS user_id, data, created_at
+            FROM emotion_timeseries
+            WHERE user_id = %s
+            ORDER BY created_at ASC
+            """,
+            (user_id,),
+        )
+        rows = cur.fetchall()
+
+    filename = f"affectra_user_{user_id[:8]}.csv"
+    return StreamingResponse(
+        _csv_iter_for_tracks(rows),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.get("/sessions/{session_id}/export.csv")
+def export_session_csv(session_id: str):
+    """CSV со всеми сэмплами эмоций конкретной сессии (camera_id / upload_id)."""
+    with get_cursor() as cur:
+        cur.execute(
+            """
+            SELECT user_id::text AS user_id, data, created_at
+            FROM emotion_timeseries
+            WHERE data->>'camera_id' = %s
+            ORDER BY created_at ASC
+            """,
+            (session_id,),
+        )
+        rows = cur.fetchall()
+
+    filename = f"affectra_session_{session_id}.csv"
+    return StreamingResponse(
+        _csv_iter_for_tracks(rows),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )

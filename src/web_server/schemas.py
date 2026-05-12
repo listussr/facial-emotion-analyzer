@@ -6,9 +6,12 @@ from pydantic import BaseModel, Field
 
 TrackerName = Literal["deepsort", "bytetrack"]
 EmotionModel = Literal[
-    "resnet-18", "resnet-18-int8",
-    "resnet-50", "resnet-50-int8",
-    "convnext", "convnext-int8",
+    "resnet-18",         "resnet-18-int8",
+    "resnet-50",         "resnet-50-int8",
+    "convnext",          "convnext-int8",
+    "convnext-gelu",
+    "efficientnet-b3",   "efficientnet-b3-int8",
+    "swin-tiny",         "swin-tiny-int8",
 ]
 Device = Literal["cpu", "cuda"]
 SessionKind = Literal["camera", "upload"]

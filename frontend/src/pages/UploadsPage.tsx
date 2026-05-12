@@ -4,6 +4,7 @@ import GridSelector, { GridCols } from '@/components/GridSelector';
 import Toggle from '@/components/Toggle';
 import { useSessions } from '@/hooks/useSessions';
 import { api } from '@/api/client';
+import { EMOTION_MODELS } from '@/data/models';
 import type { TrackerName, EmotionModel, Device } from '@/types';
 
 interface UploadEntry {
@@ -18,12 +19,7 @@ const TRACKERS: { value: TrackerName; label: string }[] = [
   { value: 'deepsort', label: 'DeepSORT' },
   { value: 'bytetrack', label: 'ByteTrack' },
 ];
-const MODELS: { value: EmotionModel; label: string }[] = [
-  { value: 'resnet-18', label: 'ResNet-18 (FP32)' },
-  { value: 'resnet-18-int8', label: 'ResNet-18 (INT8)' },
-  { value: 'resnet-50', label: 'ResNet-50 (FP32)' },
-  { value: 'convnext', label: 'ConvNeXt' },
-];
+const MODELS = EMOTION_MODELS;
 
 export default function UploadsPage() {
   const [cols, setCols] = useState<GridCols>(2);

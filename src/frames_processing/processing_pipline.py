@@ -4,8 +4,9 @@ import queue
 import threading
 import json
 import msgpack
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import cv2
@@ -53,11 +54,20 @@ class ProcessingPipeline:
         :param detection_frequency: Частота детекции кадров через mediapipe (в кадрах).
         :type detection_frequency: int
         """
+        self._default_tracker_settings: Dict = dict(tracker_settings or {})
+        self._default_analyzer_settings: Dict = dict(analyzer_settings or {})
+
         self._init_kafka_io(kafka_settings)
         self._init_detector(detector_settings)
         self._init_analyzer(analyzer_settings)
         self._init_tracker(tracker_settings)
         self._init_identifier(identifier_settings)
+
+        # Per-session реестры
+        self._session_trackers: Dict[str, "object"] = {}
+        self._recognizer_pool: Dict[Tuple[str, str, Optional[int]], "object"] = {}
+        # Дефолтный распознаватель
+        self._recognizer_pool[self._recognizer_key(None)] = self._emotion_analyzer
 
         self._emotion_frequency = emotion_frequency
         self._detection_frequency = detection_frequency
@@ -130,6 +140,55 @@ class ProcessingPipeline:
         self._identifier = FaceIdentifier(**identifier_settings)
         logging.info("Initialized identifier in pipeline")
 
+
+    def _recognizer_key(self, session_config: Optional[Dict]) -> Tuple[str, str, Optional[int]]:
+        """Ключ в пуле распознавателей: (model, device, num_threads)."""
+        if not session_config:
+            return (
+                self._default_analyzer_settings.get("model", "resnet-18"),
+                self._default_analyzer_settings.get("device", "cpu"),
+                self._default_analyzer_settings.get("num_threads"),
+            )
+        model = session_config.get("model") or self._default_analyzer_settings.get("model", "resnet-18")
+        device = session_config.get("device") or self._default_analyzer_settings.get("device", "cpu")
+        threads = self._default_analyzer_settings.get("num_threads")
+        return (model, device, threads)
+
+    def _get_recognizer(self, session_config: Optional[Dict]):
+        """
+        Возвращает EmotionRecognizer для конфигурации.
+        Разные сессии с одинаковой (model, device, threads) делят инстанс.
+        """
+        key = self._recognizer_key(session_config)
+        recog = self._recognizer_pool.get(key)
+        if recog is None:
+            logging.info(f"Spawning EmotionRecognizer for session: {key}")
+            recog = EmotionRecognizer(model=key[0], device=key[1], num_threads=key[2])
+            self._recognizer_pool[key] = recog
+        return recog
+
+    def _get_session_tracker(self, camera_id: str, session_config: Optional[Dict]):
+        """
+        Возвращает трекер именно для этой сессии (camera_id). Создаётся при первом кадре сессии.
+        """
+        tracker = self._session_trackers.get(camera_id)
+        if tracker is not None:
+            return tracker
+        per_session = dict(self._default_tracker_settings)
+        if session_config and session_config.get("tracker"):
+            per_session["type"] = session_config["tracker"]
+        logging.info(
+            f"Spawning per-session tracker for {camera_id}: type={per_session.get('type')}"
+        )
+        tracker = get_tracker(per_session)
+        self._session_trackers[camera_id] = tracker
+        return tracker
+
+    def _evict_session(self, camera_id: str) -> None:
+        """Освобождаем per-session ресурсы, когда сессия закрылась."""
+        if self._session_trackers.pop(camera_id, None) is not None:
+            logging.info(f"Released tracker for {camera_id}")
+
     # Количество секунд без обновлений, прежде чем считать трек ушедгим
     _INACTIVITY_TIMEOUT = 5.0
 
@@ -172,6 +231,11 @@ class ProcessingPipeline:
             if k not in evicted_set
             and not (k[0] == camera_id and k[1] not in active_track_ids)
         }
+
+        # Если у камеры не осталось ни одной активной/живой записи в кэше —
+        # освобождаем её per-session трекер (Kalman/Re-ID состояние больше не нужно).
+        if not any(k[0] == camera_id for k in self._cached_faces):
+            self._evict_session(camera_id)
 
     def _flush_emotion_timeseries(self, cached: Dict, key: tuple) -> None:
         """
@@ -247,22 +311,27 @@ class ProcessingPipeline:
         except Exception:
             logging.exception("Identity worker failed; keeping pending id")
 
-    def _apply_emotion_batch(self, pending: List):
+    def _apply_emotion_batch(self, pending: List, recognizer=None):
         """
         #### Батч-инференс эмоций для накопленных лиц.
 
-        Все лица текущего кадра, у которых счётчик достиг порога, прогоняются
-        через модель одним вызовом. Это значительно быстрее, чем вызывать
-        предсказание по одному лицу за раз.
+        Один кадр = одна сессия = один распознаватель. Если recognizer не задан,
+        используется дефолтный (обратная совместимость со старым flow без
+        session_config).
 
         :param pending: Список кортежей `(cached, face_crop)`.
         :type pending: List
+        :param recognizer: Конкретный EmotionRecognizer из пула. По умолчанию —
+            дефолтный пайплайновый.
         """
         if not pending:
             return
 
+        if recognizer is None:
+            recognizer = self._emotion_analyzer
+
         crops = [c for _, c in pending]
-        probs_batch = np.asarray(self._emotion_analyzer.predict(crops))
+        probs_batch = np.asarray(recognizer.predict(crops))
 
         for (cached, _), probs in zip(pending, probs_batch):
             self._emotion_smoothing(
@@ -299,8 +368,12 @@ class ProcessingPipeline:
         :rtype: Dict[str, Any]
         """
         self._frame_num += 1
+        camera_id = metadata["camera_id"]
+
+        session_config: Optional[Dict] = metadata.get("session_config") if metadata else None
+
         results = {
-            "camera_id": metadata["camera_id"],
+            "camera_id": camera_id,
             "frame_id": metadata["frame_id"],
             "faces": []
         }
@@ -310,10 +383,12 @@ class ProcessingPipeline:
         else:
             detections = None
 
+        tracker = self._get_session_tracker(camera_id, session_config)
+
         if detections:
-            tracks = self._tracker.update(detections, frame)
+            tracks = tracker.update(detections, frame)
         else:
-            tracks = self._tracker.predict()
+            tracks = tracker.predict()
 
         gray_full = None
         frame_h, frame_w = frame.shape[:2]
@@ -378,7 +453,7 @@ class ProcessingPipeline:
             results["faces"].append(entry)
             result_entries.append((cached, entry))
 
-        self._apply_emotion_batch(pending_faces)
+        self._apply_emotion_batch(pending_faces, recognizer=self._get_recognizer(session_config))
 
         for cached, entry in result_entries:
             entry["emotion"] = cached["emotion_label"]
