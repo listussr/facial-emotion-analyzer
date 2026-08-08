@@ -1,0 +1,37 @@
+# Виртуальные окружения и кэши
+venv/
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Тяжёлые артефакты, не нужные в Docker-образе
+data/
+scripts/bench_results/
+*.log
+project.log
+
+# Фронт билдится внутри своего Dockerfile — node_modules в контекст не тащим
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# Git и IDE
+.git/
+.gitignore
+.idea/
+.vscode/
+.claude/
+
+# Документация и сборка
+docs/
+*.md
+!README.md
+
+# Прочее
+.DS_Store
+*.swp

@@ -89,6 +89,9 @@ export default function StreamTile({ source, liveSrc, hideLabels = false }: Prop
               }}
             />
           </div>
+          <div className="absolute bottom-4 left-2 text-[10px] font-mono text-white/80 z-10">
+            {source.fps > 0 ? `${source.fps.toFixed(1)} FPS` : ''}
+          </div>
           <div className="absolute bottom-4 right-2 text-[10px] font-mono text-white/80 z-10">
             {formatTime(source.positionSec)} / {formatTime(source.durationSec)}
           </div>

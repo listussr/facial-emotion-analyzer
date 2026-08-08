@@ -1,7 +1,18 @@
 /**
  * Тонкий клиент к FastAPI бэкенду. Все запросы идут через Vite-прокси (/api → :8000).
  */
-import { CameraSource, UploadSource, StreamSource, TrackerName, EmotionModel, Device } from '@/types';
+import {
+  CameraSource,
+  UploadSource,
+  StreamSource,
+  TrackerName,
+  EmotionModel,
+  Device,
+  UserSummary,
+  UserHistoryDetail,
+  SessionHistoryDetail,
+  SearchMatch,
+} from '@/types';
 
 interface SessionConfigDTO {
   tracker: TrackerName;
@@ -18,6 +29,11 @@ interface SessionInfoDTO {
   config: SessionConfigDTO;
   frame_rate: number;
   started_at: string;
+  frames_sent?: number;
+  errors?: number;
+  fps?: number;
+  progress?: number;
+  position_sec?: number;
   filename?: string | null;
   duration_sec?: number | null;
   file_size?: number | null;
@@ -30,10 +46,12 @@ function dtoToSource(dto: SessionInfoDTO): StreamSource {
     tracker: dto.config.tracker,
     model: dto.config.model,
     device: dto.config.device,
-    fps: 0,
+    fps: dto.fps ?? 0,
     latencyMs: 0,
     resolution: '—',
     faces: [],
+    framesSent: dto.frames_sent ?? 0,
+    errors: dto.errors ?? 0,
   };
   if (dto.kind === 'camera') {
     return {
@@ -55,7 +73,7 @@ function dtoToSource(dto: SessionInfoDTO): StreamSource {
     kind: 'upload',
     filename: dto.filename || dto.name,
     durationSec: dto.duration_sec || 0,
-    positionSec: 0,
+    positionSec: dto.position_sec || 0,
     status:
       dto.status === 'running'
         ? 'running'
@@ -64,7 +82,7 @@ function dtoToSource(dto: SessionInfoDTO): StreamSource {
         : dto.status === 'paused'
         ? 'paused'
         : 'queued',
-    progress: 0,
+    progress: dto.progress || 0,
   } as UploadSource;
 }
 
@@ -117,12 +135,41 @@ export const api = {
     if (!r.ok) throw new Error(`Failed to stop ${id}`);
   },
 
-  async uploadFile(file: File): Promise<{ upload_id: string; filename: string; size: number }> {
+  async stopAllSessions(kind?: 'camera' | 'upload'): Promise<{ stopped: string[]; count: number }> {
+    const q = kind ? `?kind=${kind}` : '';
+    const r = await fetch(`/api/sessions${q}`, { method: 'DELETE' });
+    if (!r.ok) throw new Error(await r.text());
+    return r.json();
+  },
+
+  async uploadFile(file: File): Promise<{
+    upload_id: string;
+    filename: string;
+    size: number;
+    uploaded_at: number | null;
+  }> {
     const fd = new FormData();
     fd.append('file', file);
     const r = await fetch('/api/uploads', { method: 'POST', body: fd });
     if (!r.ok) throw new Error(await r.text());
     return r.json();
+  },
+
+  async listUploads(): Promise<
+    {
+      upload_id: string;
+      filename: string;
+      size: number;
+      saved_path: string;
+      uploaded_at: number | null;
+    }[]
+  > {
+    return jsonFetch('/api/uploads');
+  },
+
+  async deleteUpload(uploadId: string): Promise<void> {
+    const r = await fetch(`/api/uploads/${uploadId}`, { method: 'DELETE' });
+    if (!r.ok) throw new Error(await r.text());
   },
 
   async startUploadSession(payload: {
@@ -145,5 +192,44 @@ export const api = {
   eventsWsUrl(id: string): string {
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
     return `${proto}://${location.host}/api/events/${id}`;
+  },
+
+  // ---------- history ----------
+
+  async listUsers(): Promise<UserSummary[]> {
+    const data = await jsonFetch<{ users: UserSummary[] }>('/api/history/users');
+    return data.users;
+  },
+
+  async searchByFace(file: File, topK: number): Promise<SearchMatch[]> {
+    const fd = new FormData();
+    fd.append('file', file);
+    const r = await fetch(`/api/history/search?top_k=${topK}`, {
+      method: 'POST',
+      body: fd,
+    });
+    if (!r.ok) throw new Error(await r.text());
+    const data = (await r.json()) as { matches: SearchMatch[] };
+    return data.matches;
+  },
+
+  async userHistory(userId: string): Promise<UserHistoryDetail> {
+    return jsonFetch<UserHistoryDetail>(`/api/history/users/${userId}`);
+  },
+
+  userFaceUrl(userId: string): string {
+    return `/api/history/users/${userId}/face`;
+  },
+
+  async sessionHistory(sessionId: string): Promise<SessionHistoryDetail> {
+    return jsonFetch<SessionHistoryDetail>(`/api/history/sessions/${sessionId}`);
+  },
+
+  userExportCsvUrl(userId: string): string {
+    return `/api/history/users/${userId}/export.csv`;
+  },
+
+  sessionExportCsvUrl(sessionId: string): string {
+    return `/api/history/sessions/${sessionId}/export.csv`;
   },
 };

@@ -4,6 +4,7 @@ const NAV: { to: string; label: string }[] = [
   { to: '/', label: 'Главная' },
   { to: '/cameras', label: 'Камеры' },
   { to: '/uploads', label: 'Видео' },
+  { to: '/history', label: 'История' },
   { to: '/settings', label: 'Настройки' },
   { to: '/about', label: 'О системе' },
 ];

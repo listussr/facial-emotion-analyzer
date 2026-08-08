@@ -2,6 +2,7 @@ import { Link } from 'react-router-dom';
 import { StreamSource } from '@/types';
 import StreamTile from './StreamTile';
 import { api } from '@/api/client';
+import { MODEL_CHIP } from '@/data/models';
 
 interface Props {
   sources: StreamSource[];
@@ -14,14 +15,6 @@ interface Props {
 }
 
 const TRACKER_LABEL = { deepsort: 'DeepSORT', bytetrack: 'ByteTrack' } as const;
-const MODEL_LABEL: Record<string, string> = {
-  'resnet-18': 'ResNet-18',
-  'resnet-18-int8': 'ResNet-18 INT8',
-  'resnet-50': 'ResNet-50',
-  'resnet-50-int8': 'ResNet-50 INT8',
-  convnext: 'ConvNeXt',
-  'convnext-int8': 'ConvNeXt INT8',
-};
 
 export default function StreamGrid({
   sources,
@@ -68,7 +61,7 @@ export default function StreamGrid({
                   <span className="chip chip-on text-[11px]">{TRACKER_LABEL[s.tracker]}</span>
                 )}
                 {!compact && (
-                  <span className="chip text-[11px]">{MODEL_LABEL[s.model]}</span>
+                  <span className="chip text-[11px]">{MODEL_CHIP[s.model] || s.model}</span>
                 )}
               </div>
               <span className="text-xs text-slate-500 font-mono shrink-0">
@@ -76,7 +69,9 @@ export default function StreamGrid({
                   ? s.fps > 0
                     ? `${s.fps.toFixed(1)} FPS · ${s.resolution}`
                     : s.status
-                  : `${Math.round(s.progress * 100)}%`}
+                  : `${s.fps > 0 ? `${s.fps.toFixed(1)} FPS · ` : ''}${Math.round(
+                      s.progress * 100
+                    )}%`}
               </span>
             </header>
 

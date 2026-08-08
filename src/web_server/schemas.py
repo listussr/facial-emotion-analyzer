@@ -6,9 +6,12 @@ from pydantic import BaseModel, Field
 
 TrackerName = Literal["deepsort", "bytetrack"]
 EmotionModel = Literal[
-    "resnet-18", "resnet-18-int8",
-    "resnet-50", "resnet-50-int8",
-    "convnext", "convnext-int8",
+    "resnet-18",         "resnet-18-int8",
+    "resnet-50",         "resnet-50-int8",
+    "convnext",          "convnext-int8",
+    "convnext-gelu",
+    "efficientnet-b3",   "efficientnet-b3-int8",
+    "swin-tiny",         "swin-tiny-int8",
 ]
 Device = Literal["cpu", "cuda"]
 SessionKind = Literal["camera", "upload"]
@@ -49,6 +52,8 @@ class SessionInfo(BaseModel):
     frames_sent: int = 0
     errors: int = 0
     fps: float = 0.0
+    progress: float = 0.0
+    position_sec: float = 0.0
     filename: Optional[str] = None
     duration_sec: Optional[float] = None
     file_size: Optional[int] = None
@@ -59,6 +64,7 @@ class UploadInfo(BaseModel):
     filename: str
     size: int
     saved_path: str
+    uploaded_at: Optional[float] = None
 
 
 class HealthInfo(BaseModel):

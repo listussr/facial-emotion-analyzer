@@ -1,38 +1,98 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState, useCallback } from 'react';
 import StreamGrid from '@/components/StreamGrid';
 import GridSelector, { GridCols } from '@/components/GridSelector';
 import Toggle from '@/components/Toggle';
 import { useSessions } from '@/hooks/useSessions';
 import { api } from '@/api/client';
+import { EMOTION_MODELS } from '@/data/models';
 import type { TrackerName, EmotionModel, Device } from '@/types';
+
+interface UploadEntry {
+  upload_id: string;
+  filename: string;
+  size: number;
+  saved_path: string;
+  uploaded_at: number | null;
+}
 
 const TRACKERS: { value: TrackerName; label: string }[] = [
   { value: 'deepsort', label: 'DeepSORT' },
   { value: 'bytetrack', label: 'ByteTrack' },
 ];
-const MODELS: { value: EmotionModel; label: string }[] = [
-  { value: 'resnet-18', label: 'ResNet-18 (FP32)' },
-  { value: 'resnet-18-int8', label: 'ResNet-18 (INT8)' },
-  { value: 'resnet-50', label: 'ResNet-50 (FP32)' },
-  { value: 'convnext', label: 'ConvNeXt' },
-];
+const MODELS = EMOTION_MODELS;
 
 export default function UploadsPage() {
   const [cols, setCols] = useState<GridCols>(2);
-  const [tracker, setTracker] = useState<TrackerName>('deepsort');
+  const [tracker, setTracker] = useState<TrackerName>('bytetrack');
   const [model, setModel] = useState<EmotionModel>('resnet-18');
   const [device, setDevice] = useState<Device>('cpu');
   const [frameRate, setFrameRate] = useState<number>(20);
+  const [frameRateError, setFrameRateError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [pendingFile, setPendingFile] = useState<File | null>(null);
   const [error, setError] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
+  const FPS_MIN = 1;
+  const FPS_MAX = 120;
+
   const { sessions, error: listError, stop, refresh } = useSessions('upload');
+
+  // Список ранее загруженных файлов — чтобы можно было запустить тот же видеофайл
+  // повторно без повторной загрузки.
+  const [uploads, setUploads] = useState<UploadEntry[]>([]);
+  const refreshUploads = useCallback(async () => {
+    try {
+      const list = await api.listUploads();
+      setUploads(list);
+    } catch {
+      /* молча — раздел не критичен */
+    }
+  }, []);
+  useEffect(() => {
+    refreshUploads();
+    const t = window.setInterval(refreshUploads, 5000);
+    return () => window.clearInterval(t);
+  }, [refreshUploads]);
+
+  async function rerunUpload(uploadId: string, filename: string) {
+    if (frameRateError) {
+      setError(frameRateError);
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      await api.startUploadSession({
+        upload_id: uploadId,
+        name: filename,
+        frame_rate: frameRate,
+        config: { tracker, model, device },
+      });
+      await refresh();
+    } catch (e: any) {
+      setError(e?.message || 'Не удалось запустить обработку');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function deleteUpload(uploadId: string) {
+    try {
+      await api.deleteUpload(uploadId);
+      await refreshUploads();
+    } catch (e: any) {
+      setError(e?.message || 'Не удалось удалить файл');
+    }
+  }
 
   async function startProcessing() {
     if (!pendingFile) {
       fileRef.current?.click();
+      return;
+    }
+    if (frameRateError) {
+      setError(frameRateError);
       return;
     }
     setBusy(true);
@@ -48,6 +108,7 @@ export default function UploadsPage() {
       setPendingFile(null);
       if (fileRef.current) fileRef.current.value = '';
       await refresh();
+      await refreshUploads();
     } catch (e: any) {
       setError(e?.message || 'Ошибка загрузки');
     } finally {
@@ -173,11 +234,22 @@ export default function UploadsPage() {
               <input
                 className="field"
                 type="number"
-                min={1}
-                max={120}
                 value={frameRate}
-                onChange={(e) => setFrameRate(Math.max(1, Math.min(120, Number(e.target.value) || 20)))}
+                onChange={(e) => {
+                  const val = Number(e.target.value);
+                  setFrameRate(val);
+                  if (!Number.isFinite(val) || val < FPS_MIN || val > FPS_MAX) {
+                    setFrameRateError(
+                      `Допустимый диапазон: ${FPS_MIN}–${FPS_MAX} кадров/сек`
+                    );
+                  } else {
+                    setFrameRateError(null);
+                  }
+                }}
               />
+              {frameRateError && (
+                <div className="text-xs text-rose-700 mt-1">{frameRateError}</div>
+              )}
             </div>
             <div className="flex items-center justify-between">
               <div>
@@ -203,6 +275,60 @@ export default function UploadsPage() {
           </div>
         </aside>
       </div>
+
+      {uploads.length > 0 && (
+        <section className="mb-8">
+          <h2 className="font-bold text-lg mb-3">Ранее загруженные</h2>
+          <p className="text-sm text-slate-500 mb-3">
+            Запустите обработку повторно с текущими параметрами без новой загрузки.
+          </p>
+          <div className="glass divide-y divide-indigo-100/60">
+            {uploads.map((u) => (
+              <div
+                key={u.upload_id}
+                className="flex items-center justify-between gap-3 p-3 flex-wrap"
+              >
+                <div className="min-w-0 flex-1">
+                  <div className="font-medium truncate">{u.filename}</div>
+                  <div className="text-xs text-slate-500 font-mono">
+                    {(u.size / (1024 * 1024)).toFixed(1)} МБ
+                    {u.uploaded_at &&
+                      ` · ${new Date(u.uploaded_at * 1000).toLocaleString('ru-RU')}`}
+                  </div>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    className="btn btn-primary text-sm disabled:opacity-50"
+                    onClick={() => rerunUpload(u.upload_id, u.filename)}
+                    disabled={busy}
+                  >
+                    <svg width={14} height={14} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+                      <polygon points="5 3 19 12 5 21 5 3" />
+                    </svg>
+                    Запустить
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-ghost text-sm"
+                    onClick={() => {
+                      if (confirm(`Удалить файл «${u.filename}»?`)) {
+                        deleteUpload(u.upload_id);
+                      }
+                    }}
+                    title="Удалить файл"
+                  >
+                    <svg width={14} height={14} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+                      <polyline points="3 6 5 6 21 6" />
+                      <path d="M19 6l-2 14a2 2 0 0 1-2 2H9a2 2 0 0 1-2-2L5 6" />
+                    </svg>
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
 
       <h2 className="font-bold text-lg mb-4">Обрабатываемые видео</h2>
       {listError && (

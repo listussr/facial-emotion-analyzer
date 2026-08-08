@@ -22,6 +22,12 @@ class Settings:
 
     CORS_ORIGINS = ["http://localhost:5173", "http://127.0.0.1:5173"]
 
+    DB_HOST: str = os.getenv("AFFECTRA_DB_HOST", "localhost")
+    DB_PORT: int = int(os.getenv("AFFECTRA_DB_PORT", "5433"))
+    DB_NAME: str = os.getenv("AFFECTRA_DB_NAME", "emotions")
+    DB_USER: str = os.getenv("AFFECTRA_DB_USER", "app_user")
+    DB_PASSWORD: str = os.getenv("AFFECTRA_DB_PASSWORD", "basic_app_password")
+
 
 settings = Settings()
 settings.UPLOADS_DIR.mkdir(parents=True, exist_ok=True)

@@ -1,7 +1,9 @@
+import sys
 import time
 import cv2
 import msgpack
 import json
+from collections import deque
 from confluent_kafka import Producer
 import threading
 import logging
@@ -43,6 +45,11 @@ class CameraProducer:
         self.start_time: Optional[float] = None
         self.last_frame_time: Optional[float] = None
         self.frame_id = 0
+
+        self._fps_window: deque = deque(maxlen=30)
+        self.total_frames: Optional[int] = None
+        self.duration_sec: Optional[float] = None
+        self.native_fps: Optional[float] = None
         
         logging.info(f"Initialized for partition {self.config.partition} "
                         f"(total partitions: {self.config.total_partitions})")
@@ -134,17 +141,42 @@ class CameraProducer:
     def _initialize_capture(self) -> None:
         """
         Инициализация захвата видео.
+
+        На Windows для целочисленных источников (веб-камера) форсим
+        DirectShow — дефолтный MSMF-бэкенд OpenCV на 11-м поколении Intel
+        часто долго инициализируется или не открывает камеру вовсе.
         """
         try:
             if isinstance(self.config.source, str) and self.config.source.isdigit():
                 self.config.source = int(self.config.source)
-            self.cap = cv2.VideoCapture(self.config.source)
+
+            if sys.platform == "win32" and isinstance(self.config.source, int):
+                self.cap = cv2.VideoCapture(self.config.source, cv2.CAP_DSHOW)
+            else:
+                self.cap = cv2.VideoCapture(self.config.source)
+
             if not self.cap.isOpened():
                 raise Exception(f"Failed to open video source: {self.config.source}")
-                
+
             self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 2)
-            logging.info(f"Successfully connected to video source: {self.config.source}")
-            
+
+            try:
+                fps_native = float(self.cap.get(cv2.CAP_PROP_FPS) or 0)
+                total = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+                if fps_native > 0:
+                    self.native_fps = fps_native
+                if total > 0:
+                    self.total_frames = total
+                    if fps_native > 0:
+                        self.duration_sec = total / fps_native
+            except Exception:
+                pass
+
+            logging.info(
+                f"Successfully connected to video source: {self.config.source} "
+                f"(native_fps={self.native_fps}, total_frames={self.total_frames})"
+            )
+
         except Exception as e:
             logging.error(f"Failed to initialize capture: {e}")
             if self.cap:
@@ -157,9 +189,6 @@ class CameraProducer:
         """
         frame_interval = 1.0 / self.config.frame_rate
 
-        # Логируем эффективную скорость продюсера каждые 100 кадров —
-        # видно, упирается ли продюсер в `frame_rate` или в свою же
-        # (encode + resize) обработку.
         window_n = 100
         window_t = time.time()
         window_start_count = self.frame_count
@@ -183,6 +212,7 @@ class CameraProducer:
                 self._process_frame(frame)
                 self.frame_count += 1
                 self.last_frame_time = time.time()
+                self._fps_window.append(self.last_frame_time)
 
                 if (self.frame_count - window_start_count) >= window_n:
                     now = time.time()
@@ -279,6 +309,18 @@ class CameraProducer:
         Returns:
             dict: <i>Словарь для отправки в кафку.</i>
         """
+        session_config = None
+        if (
+            self.config.tracker_name
+            or self.config.emotion_model
+            or self.config.compute_device
+        ):
+            session_config = {
+                'tracker': self.config.tracker_name,
+                'model': self.config.emotion_model,
+                'device': self.config.compute_device,
+            }
+
         return msgpack.packb({
             'camera_id': self.config.camera_id,
             'frame_id': str(frame_id),
@@ -290,7 +332,8 @@ class CameraProducer:
             'original_height': original_frame.shape[0],
             'quality': self.config.quality,
             'frame_rate': self.config.frame_rate,
-            'format': 'jpeg'
+            'format': 'jpeg',
+            'session_config': session_config,
         })
 
     def _send_to_kafka(self, message: bytes) -> None:
@@ -337,6 +380,13 @@ class CameraProducer:
                 f'at offset {msg.offset()}'
             )
 
+    def _rolling_fps(self) -> float:
+        """Скользящий FPS по последним 30 отправленным кадрам."""
+        if len(self._fps_window) < 2:
+            return 0.0
+        dt = self._fps_window[-1] - self._fps_window[0]
+        return (len(self._fps_window) - 1) / dt if dt > 0 else 0.0
+
     def get_stats(self) -> Dict:
         """
         Статистика работы продюссера.
@@ -346,7 +396,14 @@ class CameraProducer:
         """
         current_time = time.time()
         duration = current_time - self.start_time if self.start_time else 0
-        fps = self.frame_count / duration if duration > 0 else 0
+
+        fps = self._rolling_fps()
+        progress: Optional[float] = None
+        position_sec: Optional[float] = None
+        if self.total_frames and self.total_frames > 0:
+            progress = min(1.0, self.frame_count / self.total_frames)
+            if self.native_fps:
+                position_sec = self.frame_count / self.native_fps
         
         return {
             'camera_id': self.config.camera_id,
@@ -356,7 +413,11 @@ class CameraProducer:
             'current_fps': fps,
             'is_running': self.is_running,
             'last_frame_time': self.last_frame_time,
-            'source': self.config.source
+            'source': self.config.source,
+            'progress': progress,
+            'position_sec': position_sec,
+            'video_duration_sec': self.duration_sec,
+            'total_frames': self.total_frames,
         }
 
     def __del__(self):

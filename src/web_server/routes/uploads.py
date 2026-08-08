@@ -3,6 +3,7 @@ import logging
 import shutil
 import uuid
 from pathlib import Path
+from typing import List
 
 from fastapi import APIRouter, File, HTTPException, UploadFile
 
@@ -14,6 +15,35 @@ router = APIRouter(prefix="/api/uploads", tags=["uploads"])
 log = logging.getLogger("uploads")
 
 ALLOWED_EXT = {".mp4", ".mov", ".mkv", ".avi", ".webm"}
+
+
+@router.get("", response_model=List[UploadInfo])
+def list_uploads():
+    """
+    Список ранее загруженных файлов в `data/uploads/`. Используется UI,
+    чтобы пользователь мог запустить обработку повторно без новой загрузки.
+    """
+    out: List[UploadInfo] = []
+    for path in settings.UPLOADS_DIR.iterdir():
+        if not path.is_file():
+            continue
+        if path.suffix.lower() not in ALLOWED_EXT:
+            continue
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        out.append(
+            UploadInfo(
+                upload_id=path.stem,
+                filename=path.name,
+                size=stat.st_size,
+                saved_path=str(path),
+                uploaded_at=stat.st_mtime,
+            )
+        )
+    out.sort(key=lambda u: -(u.uploaded_at or 0))
+    return out
 
 
 @router.post("", response_model=UploadInfo)
@@ -53,11 +83,16 @@ async def upload_file(file: UploadFile = File(...)):
         await file.close()
 
     log.info(f"Uploaded {file.filename} ({size} bytes) -> {target.name}")
+    try:
+        mtime = target.stat().st_mtime
+    except OSError:
+        mtime = None
     return UploadInfo(
         upload_id=upload_id,
         filename=file.filename,
         size=size,
         saved_path=str(target),
+        uploaded_at=mtime,
     )
 
 

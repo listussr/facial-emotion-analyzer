@@ -5,7 +5,12 @@ export type EmotionModel =
   | 'resnet-50'
   | 'resnet-50-int8'
   | 'convnext'
-  | 'convnext-int8';
+  | 'convnext-int8'
+  | 'convnext-gelu'
+  | 'efficientnet-b3'
+  | 'efficientnet-b3-int8'
+  | 'swin-tiny'
+  | 'swin-tiny-int8';
 export type Device = 'cpu' | 'cuda';
 
 export type Emotion =
@@ -60,6 +65,8 @@ export interface SourceBase {
   latencyMs: number;
   faces: FaceBox[];
   resolution: string;
+  framesSent: number;
+  errors: number;
 }
 
 export interface CameraSource extends SourceBase {
@@ -78,3 +85,45 @@ export interface UploadSource extends SourceBase {
 }
 
 export type StreamSource = CameraSource | UploadSource;
+
+// ---------- history ----------
+
+export interface UserSummary {
+  user_id: string;
+  first_seen: string | null;
+  last_seen: string | null;
+  tracks_count: number;
+  total_samples: number;
+  dominant_emotion: string | null;
+}
+
+export interface SearchMatch extends UserSummary {
+  similarity: number;
+}
+
+export interface TrackHistory {
+  track_id: number | null;
+  camera_id: string | null;
+  user_id?: string | null;
+  started_at: number | null;
+  ended_at: number | null;
+  samples: { t: number; label: Emotion; scores: number[] }[];
+  created_at: string;
+}
+
+export interface UserHistoryDetail {
+  user_id: string;
+  total_samples: number;
+  tracks_count: number;
+  label_counts: Record<string, number>;
+  tracks: TrackHistory[];
+}
+
+export interface SessionHistoryDetail {
+  session_id: string;
+  total_samples: number;
+  tracks_count: number;
+  unique_users: number;
+  label_counts: Record<string, number>;
+  tracks: TrackHistory[];
+}
