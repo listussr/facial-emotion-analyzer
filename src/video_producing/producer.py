@@ -324,14 +324,25 @@ class CameraProducer:
                 break
 
             pts_ms = item.pts_ms + self._pts_offset_ms
-            self._pacer.wait_until(pts_ms, stop_flag=self._stop_requested)
+            # Аудиочанк «готов», когда записан его последний сэмпл — как у
+            # микрофона. Отпускать его по началу значило бы отдавать звук
+            # из будущего (на длину чанка раньше реального времени).
+            release_ms = pts_ms
+            if isinstance(item, AudioChunk):
+                release_ms += item.num_samples * 1000 // self.config.audio_sample_rate
+            self._pacer.wait_until(release_ms, stop_flag=self._stop_requested)
             if not self.is_running:
                 break
 
             if self.source_info.is_live:
                 wall_ts = item.capture_wall_ts
-            else:
+            elif self._pacer.enabled:
+                # Файл в реальном темпе: событие «захвачено» в момент старт + pts
                 wall_ts = self.session_start_wall_ts + pts_ms / 1000.0
+            else:
+                # Без темпа файл читается быстрее реального времени — время
+                # «старт + pts» было бы в будущем; берём фактическое время чтения
+                wall_ts = time.time()
 
             try:
                 if isinstance(item, VideoFrame):

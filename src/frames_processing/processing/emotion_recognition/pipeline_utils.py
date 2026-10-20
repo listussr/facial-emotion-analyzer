@@ -2,7 +2,7 @@ from typing import Dict, Literal, Callable
 import numpy as np
 import logging
 
-EMOTION_LABELS = ('anger', 'contempt', 'disgust', 'fear', 'happy', 'neutral', 'sad', 'surprise')
+from src.emotion_labels import EMOTION_LABELS, NUM_EMOTIONS, label_of
 
 def idx_to_label(idx: int) -> str:
     """
@@ -13,10 +13,10 @@ def idx_to_label(idx: int) -> str:
     :return: Текстовая метка класса.
     :rtype: str
     """
-    if idx < 0 or idx >= len(EMOTION_LABELS):
-        logging.error(f"Incorrect emotion index. Required [0..7] but got {idx}")
-        return ""
-    return EMOTION_LABELS[idx]
+    label = label_of(int(idx))
+    if not label:
+        logging.error(f"Incorrect emotion index. Required [0..{NUM_EMOTIONS - 1}] but got {idx}")
+    return label
 
 
 def exponential_smoothing(cached: Dict, prediction: np.ndarray, frequency: int, ema_coef: float = 0.2):

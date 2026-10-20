@@ -3,12 +3,21 @@
 from confluent_kafka import Consumer, Producer
 import json
 import logging
+from typing import List, Optional
 
 
 class KafkaIO:
-    def __init__(self, bootstrap_servers: str, input_topic: str, output_topic: str, group_id: str):
+    def __init__(self, bootstrap_servers: str, input_topic: str, output_topic: str, group_id: str,
+                 extra_input_topics: Optional[List[str]] = None):
+        """
+        Args:
+            extra_input_topics: Дополнительные входные топики (например, события
+                сессий). Ключ у всех — camera_id, число партиций одинаковое,
+                поэтому кадры и события камеры приходят в один и тот же экземпляр.
+        """
         self.input_topic = input_topic
         self.output_topic = output_topic
+        self.input_topics = [input_topic] + [t for t in (extra_input_topics or []) if t]
 
         self.consumer = Consumer({
             'bootstrap.servers': bootstrap_servers,
@@ -17,26 +26,34 @@ class KafkaIO:
             'fetch.message.max.bytes': 10 * 1024 * 1024,
             'enable.auto.commit': True,
             'auto.commit.interval.ms': 1000,
+            'reconnect.backoff.max.ms': 1000,
         })
-        self.consumer.subscribe([input_topic])
+        self.consumer.subscribe(self.input_topics)
 
         self.producer = Producer({
             'bootstrap.servers': bootstrap_servers,
             'compression.type': 'lz4',
-            'enable.idempotence': True
+            'enable.idempotence': True,
+            'partitioner': 'murmur2_random',
+            'reconnect.backoff.max.ms': 1000,
         })
 
         self.logger = logging.getLogger("KafkaIO")
 
-    def consume(self, timeout: float = 1.0):
+    def consume_message(self, timeout: float = 1.0):
+        """Следующее сообщение целиком (нужны топик и ключ) или None."""
         msg = self.consumer.poll(timeout)
         if msg is None:
             return None
         if msg.error():
             self.logger.error(f"Kafka error: {msg.error()}")
             return None
-        return msg.value()
-    
+        return msg
+
+    def consume(self, timeout: float = 1.0):
+        msg = self.consume_message(timeout)
+        return msg.value() if msg is not None else None
+
     def produce(self, result: dict):
         try:
             self.producer.produce(

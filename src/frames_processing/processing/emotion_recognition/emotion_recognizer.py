@@ -10,6 +10,10 @@ from torchvision import transforms
 from PIL import Image
 import onnxruntime as ort
 
+from src.emotion_labels import NUM_EMOTIONS
+
+STUB_MODEL = 'stub'
+
 _MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
 _STD  = np.array([0.229, 0.224, 0.225], dtype=np.float32)
 
@@ -192,7 +196,13 @@ class _RecognizerCuda(_Recognizer):
         with torch.inference_mode():
             output = self.model(tensor)
             output = torch.softmax(output, dim=1)
-        return output.cpu().numpy()
+        probs = output.cpu().numpy()
+        if probs.shape[-1] != NUM_EMOTIONS:
+            raise ValueError(
+                f"CUDA model outputs {probs.shape[-1]} classes, but the system uses "
+                f"{NUM_EMOTIONS} (see src/emotion_labels.py)"
+            )
+        return probs
 
 
 class _RecognizerCPU(_Recognizer):
@@ -221,6 +231,14 @@ class _RecognizerCPU(_Recognizer):
             self._input_w = _as_int(shape[3], 224)
         else:
             self._input_h = self._input_w = 224
+        out_shape = self._session.get_outputs()[0].shape
+        num_classes = out_shape[-1] if out_shape and isinstance(out_shape[-1], int) else None
+        if num_classes is not None and num_classes != NUM_EMOTIONS:
+            raise ValueError(
+                f"Model {os.path.basename(model_path)} outputs {num_classes} classes, "
+                f"but the system uses {NUM_EMOTIONS} (see src/emotion_labels.py). "
+                f"Use model='{STUB_MODEL}' until a {NUM_EMOTIONS}-class model is available."
+            )
         logging.info(
             f"ONNX session ready: input={self._input_h}x{self._input_w}"
         )
@@ -251,7 +269,46 @@ class _RecognizerCPU(_Recognizer):
         return probs
 
 
+class _RecognizerStub(_Recognizer):
+    """
+    ЗАГЛУШКА распознавателя эмоций на NUM_EMOTIONS классов.
+
+    Нужна, пока нет моделей, обученных на CREMA-D: пайплайн, топики, БД и
+    слияние работают с правильной размерностью, а не с 8 классами старых моделей.
+
+    Выход детерминирован и дёшев: фиксированная случайная проекция простых
+    признаков кропа (средние и разброс яркости по каналам, пропорции) → softmax.
+    Похожие кропы дают похожие вероятности, поэтому сглаживание ведёт себя
+    правдоподобно. НИКАКОГО отношения к реальным эмоциям выход не имеет.
+    """
+    _FEATURES = 8
+
+    def __init__(self, seed: int = 0):
+        rng = np.random.default_rng(seed)
+        self._w = rng.normal(0.0, 3.0, size=(self._FEATURES, NUM_EMOTIONS)).astype(np.float32)
+        self._b = rng.normal(0.0, 0.5, size=NUM_EMOTIONS).astype(np.float32)
+        logging.warning(
+            f"EmotionRecognizer: using STUB model ({NUM_EMOTIONS} classes) — predictions are not real"
+        )
+
+    def _features(self, image: np.ndarray) -> np.ndarray:
+        small = cv2.resize(image, (16, 16), interpolation=cv2.INTER_AREA).astype(np.float32) / 255.0
+        h, w = image.shape[:2]
+        mean = small.reshape(-1, 3).mean(axis=0)
+        std = small.reshape(-1, 3).std(axis=0)
+        aspect = np.float32(w / h if h else 1.0)
+        return np.concatenate([mean, std, [aspect, 1.0]]).astype(np.float32)
+
+    def predict(self, images: ImageOrBatch) -> np.ndarray:
+        batch = images if _is_batch(images) else [images]
+        feats = np.stack([self._features(img) for img in batch])
+        logits = feats @ self._w + self._b
+        e = np.exp(logits - logits.max(axis=1, keepdims=True))
+        return e / e.sum(axis=1, keepdims=True)
+
+
 _ModelName = Literal[
+    'stub',
     'resnet-18',         'resnet-18-int8',
     'resnet-50',         'resnet-50-int8',
     'convnext',          'convnext-int8',
@@ -282,6 +339,8 @@ class EmotionRecognizer(object):
             num_threads (int, optional): Количество CPU-потоков для ORT.
                 По умолчанию = max(1, os.cpu_count() - 1). Игнорируется для CUDA.
         """
+        if model == STUB_MODEL:
+            return _RecognizerStub()
         key = f"{device}={model}"
         if key not in _models_pathes:
             available = sorted(k.split('=', 1)[1] for k in _models_pathes if k.startswith(f"{device}="))
