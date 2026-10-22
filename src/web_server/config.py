@@ -1,4 +1,7 @@
+"""Настройки веб-сервера из переменных окружения AFFECTRA_*."""
+
 import os
+
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -8,7 +11,10 @@ class Settings:
     KAFKA_BOOTSTRAP: str = os.getenv("AFFECTRA_KAFKA", "localhost:9092")
 
     TOPIC_RAW: str = os.getenv("AFFECTRA_TOPIC_RAW", "raw-video-frames")
-    TOPIC_ANALYTICS: str = os.getenv("AFFECTRA_TOPIC_ANALYTICS", "vision-analytics")
+    TOPIC_AUDIO_RAW: str = os.getenv("AFFECTRA_TOPIC_AUDIO_RAW", "raw-audio-chunks")
+    TOPIC_SESSION_EVENTS: str = os.getenv("AFFECTRA_TOPIC_SESSION_EVENTS", "session-events")
+    TOPIC_SESSION_CONFIG: str = os.getenv("AFFECTRA_TOPIC_SESSION_CONFIG", "session-config")
+    TOPIC_ANALYTICS: str = os.getenv("AFFECTRA_TOPIC_ANALYTICS", "fused-analytics")
     TOPIC_ANNOTATED: str = os.getenv("AFFECTRA_TOPIC_ANNOTATED", "annotated-video")
 
     UPLOADS_DIR: Path = REPO_ROOT / "data" / "uploads"

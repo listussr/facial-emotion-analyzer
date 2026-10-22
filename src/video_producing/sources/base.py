@@ -1,21 +1,65 @@
-import time
-from abc import ABC, abstractmethod
-from dataclasses import dataclass
-import numpy as np
-from typing import Iterator, Optional, Union
+"""Базовые типы источников медиа: кадры, аудиочанки, общий отсчёт времени сессии."""
 
-@dataclass
+import time
+import numpy as np
+
+from abc import ABC
+from abc import abstractmethod
+from dataclasses import dataclass
+from typing import Callable
+from typing import Iterator
+from typing import Optional
+from typing import Tuple
+from typing import Union
+
+
 class VideoFrame:
-    pts_ms:          int
-    capture_wall_ts: float
-    image:           np.ndarray            # BGR, как ожидает остальная система
+    """
+    Кадр источника в BGR.
+
+    Изображение может считаться лениво через loader: перевод в BGR и уменьшение выполняются
+    только для кадров, которые продюсер отправит (при 60 fps файла и 20 fps отправки — треть).
+    original_size — (ширина, высота) кадра источника до уменьшения.
+    """
+    __slots__ = ("pts_ms", "capture_wall_ts", "_image", "_loader", "_original_size")
+
+    def __init__(self, pts_ms: int, capture_wall_ts: float, image: Optional[np.ndarray] = None,
+                 loader: Optional[Callable[[], np.ndarray]] = None,
+                 original_size: Optional[Tuple[int, int]] = None):
+        if image is None and loader is None:
+            raise ValueError("VideoFrame needs image or loader")
+        self.pts_ms          = pts_ms
+        self.capture_wall_ts = capture_wall_ts
+        self._image          = image
+        self._loader         = loader
+        self._original_size  = original_size
+
+    @property
+    def image(self) -> np.ndarray:
+        if self._image is None:
+            self._image  = self._loader()
+            self._loader = None
+        return self._image
+
+    @property
+    def original_size(self) -> Tuple[int, int]:
+        if self._original_size is not None:
+            return self._original_size
+        h, w = self.image.shape[:2]
+        return w, h
+
+    def __repr__(self) -> str:
+        return f"VideoFrame(pts_ms={self.pts_ms}, size={self._original_size}, loaded={self._image is not None})"
+
 
 @dataclass
 class AudioChunk:
+    """Аудиочанк s16le interleaved; num_samples — на канал."""
     pts_ms:          int
     capture_wall_ts: float
-    pcm:             bytes                 # s16le interleaved
-    num_samples:     int                   # на канал
+    pcm:             bytes
+    num_samples:     int
+
 
 @dataclass
 class SourceInfo:
@@ -29,14 +73,10 @@ class SourceInfo:
 
 
 class SessionClock:
-    """
-    Общий отсчёт времени сессии для живых источников.
+    """Общий отсчёт времени живой сессии: кадры камеры и чанки микрофона на одной шкале."""
 
-    `pts_ms` всех потоков сессии считается от одного `t0`, поэтому кадры
-    камеры и чанки микрофона лежат на одной шкале времени.
-    """
     def __init__(self) -> None:
-        self.t0 = time.monotonic()
+        self.t0      = time.monotonic()
         self.wall_t0 = time.time()
 
     def now_ms(self) -> int:
@@ -51,11 +91,10 @@ class SessionClock:
 
 class MediaSource(ABC):
     """
-    Источник медиа. `read()` — генератор событий `VideoFrame | AudioChunk`
-    в порядке времени захвата. Генератор завершается на конце файла и
-    выбрасывает исключение при обрыве живого источника.
+    Источник медиа.
 
-    Источник не прореживает кадры и не выдерживает темп — это делает продюсер.
+    read() — генератор VideoFrame и AudioChunk в порядке захвата; завершается на конце файла,
+    при обрыве живого источника выбрасывает исключение. Прореживание и темп — на стороне продюсера.
     """
     @abstractmethod
     def open(self, want_video: bool, want_audio: bool) -> SourceInfo: ...

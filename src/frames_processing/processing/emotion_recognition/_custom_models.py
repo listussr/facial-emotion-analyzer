@@ -1,16 +1,14 @@
+"""Архитектуры для загрузки старых PyTorch-моделей эмоций, сохранённых только весами."""
+
 from __future__ import annotations
 
 import sys
-
 import torch.nn as nn
 import torch.nn.functional as F
 
 
 class CustomEfficientNetB3(nn.Module):
-    """
-    Кастомная версия EfficientNet-B3.<br>
-    Т.к. при обучении были сохранены только веса без архитектуры.
-    """
+    """EfficientNet-B3 с собственной головой: при обучении были сохранены только веса."""
 
     def __init__(self, num_classes: int = 8, pretrained: bool = True,
                  use_custom_head: bool = True) -> None:
@@ -19,9 +17,9 @@ class CustomEfficientNetB3(nn.Module):
         from efficientnet_pytorch import EfficientNet
 
         if pretrained:
-            self.backbone = EfficientNet.from_pretrained('efficientnet-b3')
+            self.backbone = EfficientNet.from_pretrained("efficientnet-b3")
         else:
-            self.backbone = EfficientNet.from_name('efficientnet-b3')
+            self.backbone = EfficientNet.from_name("efficientnet-b3")
 
         for param in self.backbone.parameters():
             param.requires_grad = False
@@ -58,7 +56,7 @@ class CustomEfficientNetB3(nn.Module):
 
 
 def _register_for_pickle(*classes) -> None:
-    main_mod = sys.modules.get('__main__')
+    main_mod = sys.modules.get("__main__")
     if main_mod is None:
         return
     for cls in classes:

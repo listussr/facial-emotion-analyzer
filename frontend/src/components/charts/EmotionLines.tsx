@@ -5,6 +5,7 @@ import {
   EMOTION_COLORS,
   EMOTION_RU,
   flattenSamples,
+  chartOrder,
   tsRange,
   formatClock,
 } from './_chart_utils';
@@ -26,7 +27,8 @@ const PAD_B = 26;
  * Y-ось — [0, 1], X-ось — время. Любую линию можно скрыть кликом по легенде.
  */
 export default function EmotionLines({ tracks, range = null, height = 220 }: Props) {
-  const samples = useMemo(() => flattenSamples(tracks, range), [tracks, range]);
+  const order = useMemo(() => chartOrder(tracks), [tracks]);
+  const samples = useMemo(() => flattenSamples(tracks, range, 600, order), [tracks, range, order]);
   const [hidden, setHidden] = useState<Set<string>>(new Set());
 
   if (samples.length === 0) {
@@ -41,7 +43,7 @@ export default function EmotionLines({ tracks, range = null, height = 220 }: Pro
   const xPx = (t: number) => PAD_L + ((t - tMin) / span) * plotW;
   const yPx = (v: number) => PAD_T + (1 - clamp01(v)) * plotH;
 
-  const polylines = EMOTION_ORDER.map((emo, i) => {
+  const polylines = order.map((emo, i) => {
     if (hidden.has(emo)) return null;
     const pts = samples.map((s) => `${xPx(s.t).toFixed(1)},${yPx(s.scores[i] ?? 0).toFixed(1)}`).join(' ');
     return (
@@ -105,7 +107,7 @@ export default function EmotionLines({ tracks, range = null, height = 220 }: Pro
       </svg>
 
       <div className="flex flex-wrap gap-2 mt-2">
-        {EMOTION_ORDER.map((emo) => {
+        {order.map((emo) => {
           const off = hidden.has(emo);
           return (
             <button

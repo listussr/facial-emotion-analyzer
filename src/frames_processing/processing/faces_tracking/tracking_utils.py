@@ -1,23 +1,31 @@
-from typing import Dict, List, Tuple
+"""Создание трекеров и преобразование рамок между форматами."""
+
 import numpy as np
-from deep_sort_realtime.deepsort_tracker import DeepSort
 import supervision as sv
+
+from typing import Dict
+from typing import List
+from typing import Tuple
+
+from deep_sort_realtime.deepsort_tracker import DeepSort
+
 
 def initialize_deepsort(deep_sort_settings: Dict) -> DeepSort:
     """
-    #### Инициализация DeepSort только с важными параметрами.
-    
-    :param deep_sort_settings: Параметры DeepSort в словаре.
-    :type deep_sort_settings: Dict
-    :return: Инициализированный класс.
-    :rtype: DeepSort
+    Создание DeepSort с основными параметрами.
+
+    Args:
+        deep_sort_settings (Dict): max_age, n_init, nn_budget, max_cosine_distance, эмбеддер.
+
+    Returns:
+        DeepSort: Трекер.
     """
-    max_age = deep_sort_settings.get("max_age", 70)
-    n_init = deep_sort_settings.get("n_init", 5)
-    nn_budget = deep_sort_settings.get("nn_budget", 100)
+    max_age             = deep_sort_settings.get("max_age", 70)
+    n_init              = deep_sort_settings.get("n_init", 5)
+    nn_budget           = deep_sort_settings.get("nn_budget", 100)
     max_cosine_distance = deep_sort_settings.get("max_cosine_distance", 0.3)
-    embedder_gpu = deep_sort_settings.get("embedder_gpu", False)
-    embedder_model_name = deep_sort_settings.get("embedder_model_name", 'mobilenet')
+    embedder_gpu        = deep_sort_settings.get("embedder_gpu", False)
+    embedder_model_name = deep_sort_settings.get("embedder_model_name", "mobilenet")
     return DeepSort(
         max_age=max_age,
         n_init=n_init,
@@ -26,6 +34,7 @@ def initialize_deepsort(deep_sort_settings: Dict) -> DeepSort:
         embedder=embedder_model_name,
         embedder_gpu=embedder_gpu,
     )
+
 
 def initialize_bytetrack(bytetrack_settings: Dict) -> sv.ByteTrack:
     return sv.ByteTrack(
@@ -36,13 +45,16 @@ def initialize_bytetrack(bytetrack_settings: Dict) -> sv.ByteTrack:
             minimum_consecutive_frames=bytetrack_settings.get("minimum_consecutive_frames", 3),
         )
 
+
 def represent_ltrb(track) -> Tuple:
     """
-    #### Вырез координат лица из трекера.
-    
-    :param track: Трек лица.
-    :return: Кортеж (координата x, координата y, ширина, высота)
-    :rtype: Tuple
+    Рамка трека в целых (x, y, w, h).
+
+    Args:
+        track: Трек с методом to_ltrb().
+
+    Returns:
+        Tuple: (x, y, w, h) или None для вырожденной рамки.
     """
     ltrb = track.to_ltrb()
     if ltrb is None:
@@ -64,14 +76,16 @@ def represent_ltrb(track) -> Tuple:
 
     return int(x1), int(y1), int(w), int(h)
 
+
 def represent_detections(detections: List[Tuple]) -> List[List]:
     """
-    Docstring для represent_detections
-    
-    :param detections: Список кортежей с детекциями лиц с кадра - [(x_left, y_left, width, height, conf),].
-    :type detections: List[Tuple]
-    :return: Список в форме, подходящей к передаче в DeepSort - [[x_left, y_left, width, height], conf, 'face'], ].
-    :rtype: List[List]
+    Детекции в формате DeepSort.
+
+    Args:
+        detections (List[Tuple]): Детекции (x, y, w, h, conf).
+
+    Returns:
+        List[List]: Элементы [[x, y, w, h], conf, "face"].
     """
     repr_detections = []
 
@@ -93,5 +107,5 @@ def represent_detections(detections: List[Tuple]) -> List[List]:
         if conf <= 0.3:
             continue
 
-        repr_detections.append([[int(x), int(y), int(w), int(h)], float(conf), 'face'])
+        repr_detections.append([[int(x), int(y), int(w), int(h)], float(conf), "face"])
     return repr_detections

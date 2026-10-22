@@ -1,9 +1,18 @@
+"""Маршруты управления сессиями."""
+
 import asyncio
-from typing import List, Optional
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
+from typing import List
+from typing import Optional
 
-from ..schemas import CreateCameraRequest, SessionInfo, SessionKind
+from fastapi import APIRouter
+from fastapi import BackgroundTasks
+from fastapi import HTTPException
+from fastapi import Query
+
+from ..schemas import CreateCameraRequest
+from ..schemas import SessionInfo
+from ..schemas import SessionKind
 from ..services.session_manager import session_manager
 
 router = APIRouter(prefix="/api/sessions", tags=["sessions"])
@@ -37,11 +46,7 @@ def create_camera(req: CreateCameraRequest):
 
 @router.delete("/{session_id}")
 async def stop_session(session_id: str, bg: BackgroundTasks):
-    """
-    Снимаем сессию из реестра синхронно (мгновенно), а тяжёлый
-    `producer.stop()` уносим в фон. Иначе запрос держит worker до 10–15 секунд
-    и блокирует другие эндпоинты.
-    """
+    """Сессия снимается из реестра сразу, а остановка продюсера (до 15 с) уходит в фон."""
     producer = session_manager.detach(session_id)
     if producer is None:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -51,11 +56,7 @@ async def stop_session(session_id: str, bg: BackgroundTasks):
 
 @router.delete("")
 async def stop_all_sessions(bg: BackgroundTasks, kind: Optional[SessionKind] = Query(default=None)):
-    """
-    Останавливает все активные сессии (опционально — только определённого
-    типа). Производит то же, что и DELETE на каждую — снимает их из реестра
-    синхронно, останавливает продюсеров в фоне.
-    """
+    """Остановка всех сессий или только сессий типа kind, как DELETE для каждой."""
     sessions = session_manager.list(kind=kind)
     stopped: List[str] = []
     for s in sessions:

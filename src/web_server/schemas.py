@@ -1,28 +1,38 @@
-from datetime import datetime
-from typing import Literal, Optional, Union
+"""Схемы API веб-сервера."""
 
-from pydantic import BaseModel, Field
+from datetime import datetime
+from typing import List
+from typing import Literal
+from typing import Optional
+from typing import Union
+
+from pydantic import BaseModel
+from pydantic import Field
 
 
 TrackerName = Literal["deepsort", "bytetrack"]
-EmotionModel = Literal[
-    "resnet-18",         "resnet-18-int8",
-    "resnet-50",         "resnet-50-int8",
-    "convnext",          "convnext-int8",
-    "convnext-gelu",
-    "efficientnet-b3",   "efficientnet-b3-int8",
-    "swin-tiny",         "swin-tiny-int8",
-]
-Device = Literal["cpu", "cuda"]
+Device      = Literal["cpu", "cuda"]
 SessionKind = Literal["camera", "upload"]
+Modality    = Literal["video", "audio"]
+FusionMethod = Literal["stack_hidden", "stack_logits", "weighted_logits", "weighted_logits_robust",
+                       "confidence_weighted", "mean_probs", "audio_only", "video_only"]
 
 
 class SessionConfig(BaseModel):
-    """Параметры обработки сессии. Сейчас сохраняются как метаданные —
-    реальный пайплайн (`consumer.py`) использует свои настройки."""
-    tracker: TrackerName = "deepsort"
-    model: EmotionModel = "resnet-18"
+    """
+    Параметры обработки сессии; публикуются в session-config до запуска продюсера.
+
+    Неизвестную модель сервисы заменяют своей по умолчанию. clip_frames и fusion_method со значением None —
+    значения по умолчанию видеоконсьюмера и сервиса слияния.
+    """
+    tracker: TrackerName = "bytetrack"
+    model: str = Field(default="crema-swin-int8", min_length=1, max_length=64)
     device: Device = "cpu"
+    modalities: List[Modality] = Field(default_factory=lambda: ["video", "audio"], min_length=1)
+    voice_model: str = Field(default="crema-wavlm-int8", min_length=1, max_length=64)
+    identification: bool = True
+    clip_frames: Optional[Literal[8, 16]] = None
+    fusion_method: Optional[FusionMethod] = None
 
 
 class CreateCameraRequest(BaseModel):
@@ -33,7 +43,7 @@ class CreateCameraRequest(BaseModel):
 
 
 class CreateUploadRequest(BaseModel):
-    """Уже загруженный файл превращаем в сессию."""
+    """Сессия по уже загруженному файлу."""
     upload_id: str
     name: str = Field(..., min_length=1, max_length=80)
     frame_rate: int = 20
@@ -57,6 +67,9 @@ class SessionInfo(BaseModel):
     filename: Optional[str] = None
     duration_sec: Optional[float] = None
     file_size: Optional[int] = None
+    modalities: List[Modality] = []
+    degraded: bool = False
+    audio_seconds_sent: float = 0.0
 
 
 class UploadInfo(BaseModel):
@@ -65,6 +78,9 @@ class UploadInfo(BaseModel):
     size: int
     saved_path: str
     uploaded_at: Optional[float] = None
+    has_video: Optional[bool] = None
+    has_audio: Optional[bool] = None
+    duration_sec: Optional[float] = None
 
 
 class HealthInfo(BaseModel):

@@ -1,27 +1,27 @@
+"""Захват кадров с вебкамеры через OpenCV."""
+
 import logging
 import sys
 import time
-from typing import Iterator, Optional
-
 import cv2
 
-from .base import MediaSource, SessionClock, SourceInfo, VideoFrame
+from typing import Iterator
+from typing import Optional
+
+from .base import MediaSource
+from .base import SessionClock
+from .base import SourceInfo
+from .base import VideoFrame
 
 
 class WebcamSource(MediaSource):
+    """
+    Вебкамера через OpenCV.
+
+    На Windows используется DirectShow: MSMF на 11-м поколении Intel часто не открывает камеру.
+    """
+
     def __init__(self, index: int, clock: Optional[SessionClock] = None):
-        """
-        Вебкамера через OpenCV.
-
-        На Windows форсим DirectShow — дефолтный MSMF-бэкенд OpenCV на
-        11-м поколении Intel часто долго инициализируется или не открывает
-        камеру вовсе.
-
-        Args:
-            index (int): Индекс камеры.
-            clock (SessionClock, optional): Общие часы сессии. Если не задан —
-                создаётся свой.
-        """
         self._index = index
         self._clock = clock or SessionClock()
         self._cap: Optional[cv2.VideoCapture] = None
@@ -39,7 +39,7 @@ class WebcamSource(MediaSource):
             raise RuntimeError(f"Failed to open webcam {self._index}")
 
         self._cap.set(cv2.CAP_PROP_BUFFERSIZE, 2)
-        fps = float(self._cap.get(cv2.CAP_PROP_FPS) or 0) or None
+        fps          = float(self._cap.get(cv2.CAP_PROP_FPS) or 0) or None
         self._closed = False
         logging.info(f"WebcamSource opened camera {self._index} (fps={fps})")
         return SourceInfo(has_video=True, has_audio=False, is_live=True, native_fps=fps)
@@ -53,7 +53,7 @@ class WebcamSource(MediaSource):
             if cap is None:
                 return
             ret, image = cap.read()
-            t = time.monotonic()
+            t          = time.monotonic()
             if not ret:
                 if self._closed:
                     return
@@ -65,7 +65,7 @@ class WebcamSource(MediaSource):
             yield VideoFrame(pts_ms=pts_ms, capture_wall_ts=self._clock.wall_ts(pts_ms), image=image)
 
     def close(self) -> None:
-        self._closed = True
+        self._closed   = True
         cap, self._cap = self._cap, None
         if cap is not None:
             cap.release()

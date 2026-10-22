@@ -24,6 +24,12 @@ export default defineConfig({
         ws: true,
         changeOrigin: true,
       },
+      // Исходные кадры для отрисовки рамок в браузере (LiveVideo)
+      '/api/live': {
+        target: 'ws://localhost:8000',
+        ws: true,
+        changeOrigin: true,
+      },
     },
   },
 });

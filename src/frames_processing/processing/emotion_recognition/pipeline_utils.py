@@ -1,36 +1,42 @@
-from typing import Dict, Literal, Callable
-import numpy as np
-import logging
+"""Сглаживание покадровых эмоций старого распознавателя."""
 
-EMOTION_LABELS = ('anger', 'contempt', 'disgust', 'fear', 'happy', 'neutral', 'sad', 'surprise')
+import logging
+import numpy as np
+
+from typing import Callable
+from typing import Dict
+from typing import Literal
+
+from src.emotion_labels import EMOTION_LABELS
+from src.emotion_labels import NUM_EMOTIONS
+from src.emotion_labels import label_of
+
 
 def idx_to_label(idx: int) -> str:
     """
-    #### Перевод индекса эмоции в метку класса.
-    
-    :param idx: Индекс эмоции.
-    :type idx: int
-    :return: Текстовая метка класса.
-    :rtype: str
+    Метка класса по индексу с ошибкой в логе вне диапазона.
+
+    Args:
+        idx (int): Индекс класса.
+
+    Returns:
+        str: Метка или пустая строка.
     """
-    if idx < 0 or idx >= len(EMOTION_LABELS):
-        logging.error(f"Incorrect emotion index. Required [0..7] but got {idx}")
-        return ""
-    return EMOTION_LABELS[idx]
+    label = label_of(int(idx))
+    if not label:
+        logging.error(f"Incorrect emotion index. Required [0..{NUM_EMOTIONS - 1}] but got {idx}")
+    return label
 
 
 def exponential_smoothing(cached: Dict, prediction: np.ndarray, frequency: int, ema_coef: float = 0.2):
     """
-    #### Экспоненциальное сглаживание эмоций для борьбы со скачками эмоций.
-    
-    :param cached: Кэшированные данные по треку.
-    :type cached: Dict
-    :param prediction: Предсказание классификатора.
-    :type prediction: np.ndarray
-    :param frequency: Частота сглаживания вызова классификатора (для более гладкой картины).
-    :type frequency: int
-    :param ema_coef: Коэффицент сглажтивания.
-    :type ema_coef: float
+    EMA вероятностей трека.
+
+    Args:
+        cached     (Dict)           : Состояние трека.
+        prediction (np.ndarray)     : Вероятности классификатора.
+        frequency  (int)            : Частота вызова классификатора, кадров.
+        ema_coef   (float, optional): Коэффициент сглаживания. Defaults to 0.2.
     """
     prediction = prediction / (prediction.sum() + 1e-6)
 
@@ -39,24 +45,20 @@ def exponential_smoothing(cached: Dict, prediction: np.ndarray, frequency: int, 
         cached["emotion_label"] = idx_to_label(np.argmax(prediction))
         return
 
-    ema_sparse_coef = ema_coef ** frequency
+    ema_sparse_coef         = ema_coef ** frequency
     cached["emotion_probs"] = ema_sparse_coef * cached["emotion_probs"] + (1 - ema_sparse_coef) * prediction
     cached["emotion_label"] = idx_to_label(np.argmax(cached["emotion_probs"]))
 
+
 def voting(cached: Dict, prediction: np.ndarray, frequency: int, ema_coef: float = 0.2):
     """
-    #### Экспоненциальное сглаживание эмоций + счётчик проявления эмоций.
-    
-    Если новая эмоция появляется меньше заданного числа раз, то остаётся старая эмоция.
+    EMA со счётчиком: новая метка принимается, только если встретилась дважды.
 
-    :param cached: Кэшированные данные по треку.
-    :type cached: Dict
-    :param prediction: Предсказание классификатора.
-    :type prediction: np.ndarray
-    :param frequency: Частота сглаживания вызова классификатора (для более гладкой картины).
-    :type frequency: int
-    :param ema_coef: Коэффицент сглажтивания.
-    :type ema_coef: float
+    Args:
+        cached     (Dict)           : Состояние трека.
+        prediction (np.ndarray)     : Вероятности классификатора.
+        frequency  (int)            : Частота вызова классификатора, кадров.
+        ema_coef   (float, optional): Коэффициент сглаживания. Defaults to 0.2.
     """
     prediction = prediction / (prediction.sum() + 1e-6)
 
@@ -65,9 +67,9 @@ def voting(cached: Dict, prediction: np.ndarray, frequency: int, ema_coef: float
         cached["emotion_label"] = idx_to_label(np.argmax(prediction))
         return
 
-    ema_sparse_coef = ema_coef ** frequency
+    ema_sparse_coef         = ema_coef ** frequency
     cached["emotion_probs"] = ema_sparse_coef * cached["emotion_probs"] + (1 - ema_sparse_coef) * prediction
-    ema_top = np.argmax(cached["emotion_probs"])
+    ema_top                 = np.argmax(cached["emotion_probs"])
 
     top = np.argmax(prediction)
 
@@ -77,18 +79,16 @@ def voting(cached: Dict, prediction: np.ndarray, frequency: int, ema_coef: float
         cached["emotion_label"] = idx_to_label(ema_top)
         cached["votes"].fill(0)
 
+
 def hysteresis_exp_smoothing(cached: Dict, prediction: np.ndarray, frequency: int, ema_coef: float = 0.2):
     """
-    #### Экспоненциальное сглаживание эмоций + улучшенный счётчик проявления эмоций.
-    
-    :param cached: Кэшированные данные по треку.
-    :type cached: Dict
-    :param prediction: Предсказание классификатора.
-    :type prediction: np.ndarray
-    :param frequency: Частота сглаживания вызова классификатора (для более гладкой картины).
-    :type frequency: int
-    :param ema_coef: Коэффицент сглажтивания.
-    :type ema_coef: float
+    EMA с гистерезисом: метка меняется после двух уверенных предсказаний подряд.
+
+    Args:
+        cached     (Dict)           : Состояние трека.
+        prediction (np.ndarray)     : Вероятности классификатора.
+        frequency  (int)            : Частота вызова классификатора, кадров.
+        ema_coef   (float, optional): Коэффициент сглаживания. Defaults to 0.2.
     """
     num_labels = len(EMOTION_LABELS)
     if (
@@ -97,18 +97,18 @@ def hysteresis_exp_smoothing(cached: Dict, prediction: np.ndarray, frequency: in
         or cached.get("emotion_probs") is None
         or cached["emotion_probs"].size != num_labels
     ):
-        cached["emotion_probs"] = prediction[:num_labels].copy()
-        cached["emotion_label"] = idx_to_label(int(np.argmax(cached["emotion_probs"])))
+        cached["emotion_probs"]          = prediction[:num_labels].copy()
+        cached["emotion_label"]          = idx_to_label(int(np.argmax(cached["emotion_probs"])))
         cached["emotion_switch_counter"] = 0
         return
 
     if cached.get("emotion_probs") is None:
-        cached["emotion_probs"] = prediction.copy()
-        cached["emotion_label"] = idx_to_label(np.argmax(prediction))
+        cached["emotion_probs"]          = prediction.copy()
+        cached["emotion_label"]          = idx_to_label(np.argmax(prediction))
         cached["emotion_switch_counter"] = 0
         return
 
-    ema_sparse_coef = ema_coef ** frequency
+    ema_sparse_coef         = ema_coef ** frequency
     cached["emotion_probs"] = ema_sparse_coef * cached["emotion_probs"] + (1 - ema_sparse_coef) * prediction
 
     new_label = idx_to_label(np.argmax(cached["emotion_probs"]))
@@ -119,20 +119,22 @@ def hysteresis_exp_smoothing(cached: Dict, prediction: np.ndarray, frequency: in
         cached["emotion_switch_counter"] = max(0, cached["emotion_switch_counter"] - 1)
 
     if cached["emotion_switch_counter"] >= 2:
-        cached["emotion_label"] = new_label
+        cached["emotion_label"]          = new_label
         cached["emotion_switch_counter"] = 0
 
-def get_emotion_smoothing_strategy(strategy: Literal['ema', 'ema_voting', 'ema_hysteresis']) -> Callable:
+
+def get_emotion_smoothing_strategy(strategy: Literal["ema", "ema_voting", "ema_hysteresis"]) -> Callable:
     """
-    #### Фабрика функций сглаживания эмоционального ряда.
-    
-    :param strategy: Название стратегии сглаживания эмоций.
-    :type strategy: Literal['ema', 'ema_voting', 'ema_hysteresis']
-    :return: Функция сглаживания эмоций.
-    :rtype: Callable[..., Any]
+    Функция сглаживания по имени стратегии.
+
+    Args:
+        strategy (Literal): "ema", "ema_voting" или "ema_hysteresis".
+
+    Returns:
+        Callable: Функция сглаживания; по умолчанию гистерезис.
     """
     return {
-        'ema': exponential_smoothing,
-        'ema_voting': voting,
-        'ema_hysteresis': hysteresis_exp_smoothing,
+        "ema": exponential_smoothing,
+        "ema_voting": voting,
+        "ema_hysteresis": hysteresis_exp_smoothing,
     }.get(strategy, hysteresis_exp_smoothing)

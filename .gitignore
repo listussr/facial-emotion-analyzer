@@ -211,3 +211,7 @@ __marimo__/
 *.pth
 *.onnx
 *.claude
+# Модели CREMA-D (emotion_kit): веса не храним в git, параметры слияния и отчёты — храним
+models/crema/*.npz
+models/crema/*.pt
+crema_emotion_models.zip

@@ -5,6 +5,7 @@ import {
   EMOTION_COLORS,
   EMOTION_RU,
   flattenSamples,
+  chartOrder,
   tsRange,
   formatClock,
 } from './_chart_utils';
@@ -30,7 +31,8 @@ const PAD_B = 26;
  * не сошлась — визуально это удобнее, чем «обрезанная» сверху картинка.
  */
 export default function EmotionAreaChart({ tracks, range = null, height = 220 }: Props) {
-  const samples = useMemo(() => flattenSamples(tracks, range), [tracks, range]);
+  const order = useMemo(() => chartOrder(tracks), [tracks]);
+  const samples = useMemo(() => flattenSamples(tracks, range, 600, order), [tracks, range, order]);
 
   if (samples.length < 2) {
     return <p className="text-sm text-slate-500">Нужно минимум 2 сэмпла для области.</p>;
@@ -58,7 +60,7 @@ export default function EmotionAreaChart({ tracks, range = null, height = 220 }:
   });
 
   // Полигоны: для каждой эмоции — лента между cum[i-1] и cum[i] по всем сэмплам
-  const polygons = EMOTION_ORDER.map((emo, i) => {
+  const polygons = order.map((emo, i) => {
     const topPts = samples.map((s, k) => `${xPx(s.t).toFixed(1)},${yPx(cums[k][i]).toFixed(1)}`);
     const bottomPts = samples.map((s, k) => {
       const v = i === 0 ? 0 : cums[k][i - 1];
@@ -113,7 +115,7 @@ export default function EmotionAreaChart({ tracks, range = null, height = 220 }:
       </svg>
 
       <div className="flex flex-wrap gap-2 mt-2">
-        {EMOTION_ORDER.map((emo) => (
+        {order.map((emo) => (
           <span
             key={emo}
             className="inline-flex items-center gap-1 text-[11px] text-slate-600"

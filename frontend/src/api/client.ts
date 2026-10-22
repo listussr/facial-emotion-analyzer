@@ -7,17 +7,31 @@ import {
   StreamSource,
   TrackerName,
   EmotionModel,
+  VoiceModel,
   Device,
+  Modality,
+  HistoryModality,
+  FusionMethod,
+  ClipFrames,
   UserSummary,
   UserHistoryDetail,
   SessionHistoryDetail,
   SearchMatch,
+  VoiceHistory,
 } from '@/types';
 
-interface SessionConfigDTO {
+/** Настройки обработки сессии — уходят в топик session-config до старта продюсера. */
+export interface SessionConfigDTO {
   tracker: TrackerName;
   model: EmotionModel;
   device: Device;
+  modalities: Modality[];
+  voice_model: VoiceModel;
+  identification: boolean;
+  /** null / нет — по умолчанию видеоконсьюмера */
+  clip_frames?: ClipFrames | null;
+  /** null / нет — по умолчанию сервиса слияния (stack_hidden) */
+  fusion_method?: FusionMethod | null;
 }
 
 interface SessionInfoDTO {
@@ -37,6 +51,20 @@ interface SessionInfoDTO {
   filename?: string | null;
   duration_sec?: number | null;
   file_size?: number | null;
+  modalities?: Modality[];
+  degraded?: boolean;
+  audio_seconds_sent?: number;
+}
+
+export interface UploadEntry {
+  upload_id: string;
+  filename: string;
+  size: number;
+  saved_path: string;
+  uploaded_at: number | null;
+  has_video?: boolean | null;
+  has_audio?: boolean | null;
+  duration_sec?: number | null;
 }
 
 function dtoToSource(dto: SessionInfoDTO): StreamSource {
@@ -52,6 +80,13 @@ function dtoToSource(dto: SessionInfoDTO): StreamSource {
     faces: [],
     framesSent: dto.frames_sent ?? 0,
     errors: dto.errors ?? 0,
+    requestedModalities: dto.config.modalities ?? ['video'],
+    modalities: dto.modalities ?? [],
+    degraded: Boolean(dto.degraded),
+    voiceModel: dto.config.voice_model,
+    audioSeconds: dto.audio_seconds_sent ?? 0,
+    fusionMethod: dto.config.fusion_method ?? null,
+    clipFrames: dto.config.clip_frames ?? null,
   };
   if (dto.kind === 'camera') {
     return {
@@ -110,6 +145,10 @@ async function jsonFetch<T>(url: string, init?: RequestInit, timeoutMs = 8000): 
   }
 }
 
+function withModality(url: string, modality?: HistoryModality): string {
+  return modality ? `${url}?modality=${modality}` : url;
+}
+
 export const api = {
   async listSessions(kind?: 'camera' | 'upload'): Promise<StreamSource[]> {
     const q = kind ? `?kind=${kind}` : '';
@@ -123,10 +162,12 @@ export const api = {
     frame_rate: number;
     config: SessionConfigDTO;
   }): Promise<StreamSource> {
-    const dto = await jsonFetch<SessionInfoDTO>('/api/sessions/camera', {
-      method: 'POST',
-      body: JSON.stringify(payload),
-    });
+    // Создание включает проверку источника и публикацию конфига — дольше обычного запроса
+    const dto = await jsonFetch<SessionInfoDTO>(
+      '/api/sessions/camera',
+      { method: 'POST', body: JSON.stringify(payload) },
+      20000
+    );
     return dtoToSource(dto);
   },
 
@@ -142,12 +183,7 @@ export const api = {
     return r.json();
   },
 
-  async uploadFile(file: File): Promise<{
-    upload_id: string;
-    filename: string;
-    size: number;
-    uploaded_at: number | null;
-  }> {
+  async uploadFile(file: File): Promise<UploadEntry> {
     const fd = new FormData();
     fd.append('file', file);
     const r = await fetch('/api/uploads', { method: 'POST', body: fd });
@@ -155,15 +191,7 @@ export const api = {
     return r.json();
   },
 
-  async listUploads(): Promise<
-    {
-      upload_id: string;
-      filename: string;
-      size: number;
-      saved_path: string;
-      uploaded_at: number | null;
-    }[]
-  > {
+  async listUploads(): Promise<UploadEntry[]> {
     return jsonFetch('/api/uploads');
   },
 
@@ -178,15 +206,22 @@ export const api = {
     frame_rate: number;
     config: SessionConfigDTO;
   }): Promise<StreamSource> {
-    const dto = await jsonFetch<SessionInfoDTO>('/api/uploads/session', {
-      method: 'POST',
-      body: JSON.stringify(payload),
-    });
+    const dto = await jsonFetch<SessionInfoDTO>(
+      '/api/uploads/session',
+      { method: 'POST', body: JSON.stringify(payload) },
+      20000
+    );
     return dtoToSource(dto);
   },
 
   streamUrl(id: string): string {
     return `/api/stream/${id}`;
+  },
+
+  /** Исходные кадры сессии (JPEG + pts) для отрисовки рамок в браузере */
+  liveWsUrl(id: string): string {
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+    return `${proto}://${location.host}/api/live/${id}`;
   },
 
   eventsWsUrl(id: string): string {
@@ -213,23 +248,30 @@ export const api = {
     return data.matches;
   },
 
-  async userHistory(userId: string): Promise<UserHistoryDetail> {
-    return jsonFetch<UserHistoryDetail>(`/api/history/users/${userId}`);
+  /** История человека; modality: 'face' (по умолчанию) или 'fused' — после слияния с голосом. */
+  async userHistory(userId: string, modality?: HistoryModality): Promise<UserHistoryDetail> {
+    return jsonFetch<UserHistoryDetail>(withModality(`/api/history/users/${userId}`, modality));
   },
 
   userFaceUrl(userId: string): string {
     return `/api/history/users/${userId}/face`;
   },
 
-  async sessionHistory(sessionId: string): Promise<SessionHistoryDetail> {
-    return jsonFetch<SessionHistoryDetail>(`/api/history/sessions/${sessionId}`);
+  async sessionHistory(sessionId: string, modality?: HistoryModality): Promise<SessionHistoryDetail> {
+    return jsonFetch<SessionHistoryDetail>(withModality(`/api/history/sessions/${sessionId}`, modality));
   },
 
-  userExportCsvUrl(userId: string): string {
-    return `/api/history/users/${userId}/export.csv`;
+  /** Голос сессии (окна с речью) — без привязки к человеку. */
+  async sessionVoice(sessionId: string): Promise<VoiceHistory> {
+    return jsonFetch<VoiceHistory>(`/api/history/sessions/${sessionId}/voice`);
   },
 
-  sessionExportCsvUrl(sessionId: string): string {
-    return `/api/history/sessions/${sessionId}/export.csv`;
+  /** CSV; без modality — все модальности (колонка modality в файле). */
+  userExportCsvUrl(userId: string, modality?: HistoryModality): string {
+    return withModality(`/api/history/users/${userId}/export.csv`, modality);
+  },
+
+  sessionExportCsvUrl(sessionId: string, modality?: HistoryModality): string {
+    return withModality(`/api/history/sessions/${sessionId}/export.csv`, modality);
   },
 };

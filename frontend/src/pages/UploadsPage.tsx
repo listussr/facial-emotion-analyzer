@@ -2,18 +2,13 @@ import { useEffect, useRef, useState, useCallback } from 'react';
 import StreamGrid from '@/components/StreamGrid';
 import GridSelector, { GridCols } from '@/components/GridSelector';
 import Toggle from '@/components/Toggle';
+import ProcessingOptions, { MODALITY_LABEL } from '@/components/ProcessingOptions';
 import { useSessions } from '@/hooks/useSessions';
-import { api } from '@/api/client';
-import { EMOTION_MODELS } from '@/data/models';
-import type { TrackerName, EmotionModel, Device } from '@/types';
-
-interface UploadEntry {
-  upload_id: string;
-  filename: string;
-  size: number;
-  saved_path: string;
-  uploaded_at: number | null;
-}
+import { api, UploadEntry, SessionConfigDTO } from '@/api/client';
+import {
+  EMOTION_MODELS, DEFAULT_EMOTION_MODEL, DEFAULT_VOICE_MODEL, DEFAULT_CLIP_FRAMES, DEFAULT_FUSION_METHOD,
+} from '@/data/models';
+import type { TrackerName, EmotionModel, Device, Modality, VoiceModel, ClipFrames, FusionMethod } from '@/types';
 
 const TRACKERS: { value: TrackerName; label: string }[] = [
   { value: 'deepsort', label: 'DeepSORT' },
@@ -24,8 +19,13 @@ const MODELS = EMOTION_MODELS;
 export default function UploadsPage() {
   const [cols, setCols] = useState<GridCols>(2);
   const [tracker, setTracker] = useState<TrackerName>('bytetrack');
-  const [model, setModel] = useState<EmotionModel>('resnet-18');
+  const [model, setModel] = useState<EmotionModel>(DEFAULT_EMOTION_MODEL);
   const [device, setDevice] = useState<Device>('cpu');
+  const [modalities, setModalities] = useState<Modality[]>(['video', 'audio']);
+  const [voiceModel, setVoiceModel] = useState<VoiceModel>(DEFAULT_VOICE_MODEL);
+  const [identification, setIdentification] = useState(true);
+  const [clipFrames, setClipFrames] = useState<ClipFrames>(DEFAULT_CLIP_FRAMES);
+  const [fusionMethod, setFusionMethod] = useState<FusionMethod>(DEFAULT_FUSION_METHOD);
   const [frameRate, setFrameRate] = useState<number>(20);
   const [frameRateError, setFrameRateError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -37,6 +37,11 @@ export default function UploadsPage() {
   const FPS_MAX = 120;
 
   const { sessions, error: listError, stop, refresh } = useSessions('upload');
+
+  const config = (): SessionConfigDTO => ({
+    tracker, model, device, modalities, voice_model: voiceModel, identification,
+    clip_frames: clipFrames, fusion_method: fusionMethod,
+  });
 
   // Список ранее загруженных файлов — чтобы можно было запустить тот же видеофайл
   // повторно без повторной загрузки.
@@ -67,7 +72,7 @@ export default function UploadsPage() {
         upload_id: uploadId,
         name: filename,
         frame_rate: frameRate,
-        config: { tracker, model, device },
+        config: config(),
       });
       await refresh();
     } catch (e: any) {
@@ -103,7 +108,7 @@ export default function UploadsPage() {
         upload_id: upload.upload_id,
         name: pendingFile.name,
         frame_rate: frameRate,
-        config: { tracker, model, device },
+        config: config(),
       });
       setPendingFile(null);
       if (fileRef.current) fileRef.current.value = '';
@@ -150,7 +155,7 @@ export default function UploadsPage() {
             <input
               ref={fileRef}
               type="file"
-              accept="video/*"
+              accept="video/*,audio/*"
               className="hidden"
               onChange={(e) => setPendingFile(e.target.files?.[0] || null)}
             />
@@ -165,12 +170,12 @@ export default function UploadsPage() {
               </svg>
             </div>
             <h3 className="mt-4 font-bold text-lg">
-              {pendingFile ? pendingFile.name : 'Перетащите видео сюда'}
+              {pendingFile ? pendingFile.name : 'Перетащите видео или аудио сюда'}
             </h3>
             <p className="text-sm text-slate-600">
               {pendingFile
                 ? `Размер: ${(pendingFile.size / (1024 * 1024)).toFixed(1)} МБ`
-                : '.mp4 · .mov · .mkv · до 2 ГБ'}
+                : '.mp4 · .mov · .mkv · .wav · .mp3 · .m4a · до 2 ГБ'}
             </p>
             {!pendingFile && <button className="btn btn-primary mt-5">Выбрать файл</button>}
           </div>
@@ -251,13 +256,18 @@ export default function UploadsPage() {
                 <div className="text-xs text-rose-700 mt-1">{frameRateError}</div>
               )}
             </div>
-            <div className="flex items-center justify-between">
-              <div>
-                <div className="font-medium">Идентифицировать лица</div>
-                <div className="text-xs text-slate-500">Сопоставлять с базой</div>
-              </div>
-              <Toggle defaultOn />
-            </div>
+            <ProcessingOptions
+              modalities={modalities}
+              onModalitiesChange={setModalities}
+              voiceModel={voiceModel}
+              onVoiceModelChange={setVoiceModel}
+              identification={identification}
+              onIdentificationChange={setIdentification}
+              clipFrames={clipFrames}
+              onClipFramesChange={setClipFrames}
+              fusionMethod={fusionMethod}
+              onFusionMethodChange={setFusionMethod}
+            />
             <div className="flex items-center justify-between">
               <div>
                 <div className="font-medium">Сохранить аннотированное видео</div>
@@ -291,6 +301,10 @@ export default function UploadsPage() {
                 <div className="min-w-0 flex-1">
                   <div className="font-medium truncate">{u.filename}</div>
                   <div className="text-xs text-slate-500 font-mono">
+                    {[u.has_video && MODALITY_LABEL.video, u.has_audio && MODALITY_LABEL.audio]
+                      .filter(Boolean)
+                      .join(' + ') || '?'}
+                    {' · '}
                     {(u.size / (1024 * 1024)).toFixed(1)} МБ
                     {u.uploaded_at &&
                       ` · ${new Date(u.uploaded_at * 1000).toLocaleString('ru-RU')}`}

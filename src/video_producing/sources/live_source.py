@@ -1,36 +1,39 @@
+"""Живой захват с вебкамеры и микрофона на общих часах сессии."""
+
 import logging
 import queue
 import threading
-from typing import Iterator, List, Optional, Union
 
-from .base import AudioChunk, MediaSource, SessionClock, SourceInfo, VideoFrame
+from typing import Iterator
+from typing import List
+from typing import Optional
+from typing import Union
+
+from .base import AudioChunk
+from .base import MediaSource
+from .base import SessionClock
+from .base import SourceInfo
+from .base import VideoFrame
 
 _END = object()
 
 
 class LiveSource(MediaSource):
+    """
+    Живой захват: вебкамера и/или микрофон с общими часами сессии.
+
+    Каждый источник читается в своём потоке, события сливаются в одну очередь. При переполнении
+    выбрасываются кадры, но не звук: пропуск звука заметнее и ломает окна аудиомодели.
+    Обрыв одного источника обрывает всю сессию — продюсер переподключится целиком.
+    """
+
     def __init__(self, camera_index: Optional[int], mic_device: Optional[Union[str, int]],
                  sample_rate: int, channels: int, samples_per_chunk: int,
                  queue_size: int = 64):
-        """
-        Живой захват: вебкамера и/или микрофон с общими часами сессии.
-
-        Каждый источник читается в своём потоке, события сливаются в одну
-        очередь. При переполнении выбрасываются видеокадры, аудио — нет
-        (пропуск звука заметнее и ломает окна аудиомодели).
-
-        Args:
-            camera_index (int, optional): Индекс камеры; None — без видео.
-            mic_device (str | int | None): Устройство микрофона (None — по умолчанию).
-            sample_rate (int): Частота дискретизации аудио, Гц.
-            channels (int): Количество аудиоканалов.
-            samples_per_chunk (int): Сэмплов (на канал) в одном аудиочанке.
-            queue_size (int): Размер общей очереди событий.
-        """
-        self._camera_index = camera_index
-        self._mic_device = mic_device
-        self._sample_rate = sample_rate
-        self._channels = channels
+        self._camera_index      = camera_index
+        self._mic_device        = mic_device
+        self._sample_rate       = sample_rate
+        self._channels          = channels
         self._samples_per_chunk = samples_per_chunk
 
         self._clock: Optional[SessionClock] = None
@@ -47,14 +50,14 @@ class LiveSource(MediaSource):
 
     def open(self, want_video: bool, want_audio: bool) -> SourceInfo:
         self._clock = SessionClock()
-        info = SourceInfo(has_video=False, has_audio=False, is_live=True)
+        info        = SourceInfo(has_video=False, has_audio=False, is_live=True)
         try:
             if want_video and self._camera_index is not None:
                 from .webcam_source import WebcamSource
-                cam = WebcamSource(self._camera_index, clock=self._clock)
+                cam      = WebcamSource(self._camera_index, clock=self._clock)
                 cam_info = cam.open()
                 self._sources.append(cam)
-                info.has_video = True
+                info.has_video  = True
                 info.native_fps = cam_info.native_fps
             if want_audio:
                 from .mic_source import MicSource
@@ -62,7 +65,7 @@ class LiveSource(MediaSource):
                                 self._samples_per_chunk, clock=self._clock)
                 mic.open()
                 self._sources.append(mic)
-                info.has_audio = True
+                info.has_audio         = True
                 info.audio_native_rate = self._sample_rate
         except Exception:
             self.close()
@@ -96,7 +99,6 @@ class LiveSource(MediaSource):
                     self._queue.put(_END, timeout=0.2)
                     break
                 except queue.Full:
-                    # Читатель ушёл — освобождаем место под маркер конца
                     try:
                         self._queue.get_nowait()
                     except queue.Empty:
@@ -119,8 +121,6 @@ class LiveSource(MediaSource):
             item = self._queue.get()
             if item is _END:
                 finished += 1
-                # Обрыв одного источника — обрыв всей живой сессии:
-                # продюсер переподключится целиком, с теми же часами нельзя.
                 if self._error is not None:
                     raise RuntimeError(f"Live source failed: {self._error}") from self._error
                 if not self._stop.is_set():

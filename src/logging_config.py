@@ -1,25 +1,28 @@
-import logging
-import sys
-import os
-import json
+"""Настройка логирования сервисов: JSON-логи или цветной текст."""
+
 import contextvars
-import colorama
+import json
+import logging
+import os
+import sys
 import traceback
+import colorama
 
 colorama.init()
 
 trace_id_var = contextvars.ContextVar("trace_id", default="")
 
 COLORS = {
-    'DEBUG': '\033[36m',
-    'INFO': '\033[32m',
-    'WARNING': '\033[33m',
-    'ERROR': '\033[31m',
-    'CRITICAL': '\033[35m',
+    "DEBUG": "\033[36m",
+    "INFO": "\033[32m",
+    "WARNING": "\033[33m",
+    "ERROR": "\033[31m",
+    "CRITICAL": "\033[35m",
 }
-RESET = '\033[0m'
+RESET = "\033[0m"
 
 trace_id_var = contextvars.ContextVar("trace_id", default="")
+
 
 class ColoredFormatter(logging.Formatter):
     def __init__(self, service_name: str):
@@ -30,8 +33,9 @@ class ColoredFormatter(logging.Formatter):
         levelname = record.levelname
         if levelname in COLORS:
             colored_levelname = COLORS[levelname] + levelname + RESET
-            record.levelname = colored_levelname
+            record.levelname  = colored_levelname
         return super().format(record)
+
 
 class JSONFormatter(logging.Formatter):
     def __init__(self, service_name: str):
@@ -58,13 +62,22 @@ class JSONFormatter(logging.Formatter):
 
         return json.dumps(log_entry, ensure_ascii=False)
 
+
 def setup_logger(
     service_name: str,
     log_level: str = None,
     json_format: bool = True
 ):
+    """
+    Настройка корневого логгера сервиса.
+
+    Args:
+        service_name (str)           : Имя сервиса в логах.
+        log_level    (str, optional) : Уровень; по умолчанию LOG_LEVEL или INFO. Defaults to None.
+        json_format  (bool, optional): JSON вместо цветного текста. Defaults to True.
+    """
     log_level = (log_level or os.getenv("LOG_LEVEL", "INFO")).upper()
-    logger = logging.getLogger()
+    logger    = logging.getLogger()
     logger.setLevel(log_level)
 
     logger.handlers.clear()

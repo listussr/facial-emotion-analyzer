@@ -1,27 +1,29 @@
 export type TrackerName = 'deepsort' | 'bytetrack';
-export type EmotionModel =
-  | 'resnet-18'
-  | 'resnet-18-int8'
-  | 'resnet-50'
-  | 'resnet-50-int8'
-  | 'convnext'
-  | 'convnext-int8'
-  | 'convnext-gelu'
-  | 'efficientnet-b3'
-  | 'efficientnet-b3-int8'
-  | 'swin-tiny'
-  | 'swin-tiny-int8';
+/**
+ * Имя модели эмоций лица / голоса. Список доступных — в `data/models.ts`;
+ * бэкенд заменяет несовместимую модель моделью по умолчанию.
+ */
+export type EmotionModel = string;
+export type VoiceModel = string;
 export type Device = 'cpu' | 'cuda';
+export type Modality = 'video' | 'audio';
+/** Модальность таймсерий в истории: эмоции лица или итог после слияния с голосом. */
+export type HistoryModality = 'face' | 'fused';
 
-export type Emotion =
-  | 'anger'
-  | 'contempt'
-  | 'disgust'
-  | 'fear'
-  | 'happy'
-  | 'neutral'
-  | 'sad'
-  | 'surprise';
+/**
+ * Текущий набор классов (CREMA-D, 6 эмоций) + классы старых записей
+ * (8-классовые модели до перехода), которые ещё встречаются в истории.
+ */
+export type CurrentEmotion = 'anger' | 'disgust' | 'fear' | 'happy' | 'neutral' | 'sad';
+export type LegacyEmotion = 'contempt' | 'surprise';
+export type Emotion = CurrentEmotion | LegacyEmotion;
+
+/** Порядок совпадает с src/emotion_labels.py — i-й элемент scores новых записей. */
+export const CURRENT_EMOTIONS: CurrentEmotion[] = ['anger', 'disgust', 'fear', 'happy', 'neutral', 'sad'];
+/** Порядок scores старых 8-классовых записей (без поля labels). */
+export const LEGACY_LABELS: Emotion[] = [
+  'anger', 'contempt', 'disgust', 'fear', 'happy', 'neutral', 'sad', 'surprise',
+];
 
 export const EMOTION_RU: Record<Emotion, string> = {
   anger: 'злость',
@@ -55,6 +57,20 @@ export interface FaceBox {
   color: string;
 }
 
+/** Алгоритм слияния лица и голоса (emotion_kit, models/crema/usage_rules.md, п. 4) */
+export type FusionMethod =
+  | 'stack_hidden'
+  | 'stack_logits'
+  | 'weighted_logits'
+  | 'weighted_logits_robust'
+  | 'confidence_weighted'
+  | 'mean_probs'
+  | 'audio_only'
+  | 'video_only';
+
+/** Кадров на окно модели эмоций лица */
+export type ClipFrames = 8 | 16;
+
 export interface SourceBase {
   id: string;
   name: string;
@@ -67,6 +83,16 @@ export interface SourceBase {
   resolution: string;
   framesSent: number;
   errors: number;
+  /** Запрошенные модальности сессии */
+  requestedModalities?: Modality[];
+  /** Что реально идёт (источник может не дать часть запрошенного) */
+  modalities?: Modality[];
+  degraded?: boolean;
+  voiceModel?: VoiceModel;
+  audioSeconds?: number;
+  /** null — по умолчанию сервиса */
+  fusionMethod?: FusionMethod | null;
+  clipFrames?: ClipFrames | null;
 }
 
 export interface CameraSource extends SourceBase {
@@ -105,6 +131,10 @@ export interface TrackHistory {
   track_id: number | null;
   camera_id: string | null;
   user_id?: string | null;
+  modality?: HistoryModality;
+  label_set?: string;
+  /** К каким классам относятся samples[].scores (у старых записей — 8 классов) */
+  labels?: Emotion[];
   started_at: number | null;
   ended_at: number | null;
   samples: { t: number; label: Emotion; scores: number[] }[];
@@ -113,6 +143,8 @@ export interface TrackHistory {
 
 export interface UserHistoryDetail {
   user_id: string;
+  modality?: HistoryModality;
+  available_modalities?: HistoryModality[];
   total_samples: number;
   tracks_count: number;
   label_counts: Record<string, number>;
@@ -121,9 +153,29 @@ export interface UserHistoryDetail {
 
 export interface SessionHistoryDetail {
   session_id: string;
+  modality?: HistoryModality;
+  available_modalities?: HistoryModality[];
   total_samples: number;
   tracks_count: number;
   unique_users: number;
   label_counts: Record<string, number>;
   tracks: TrackHistory[];
+}
+
+export interface VoiceHistory {
+  session_id: string;
+  label_set: string;
+  labels: Emotion[];
+  total_windows: number;
+  label_counts: Record<string, number>;
+  windows: {
+    window_seq: number;
+    pts_start_ms: number;
+    pts_end_ms: number;
+    t?: number;
+    speech_prob?: number;
+    label?: Emotion | null;
+    smoothed_label?: Emotion | null;
+    scores?: number[] | null;
+  }[];
 }

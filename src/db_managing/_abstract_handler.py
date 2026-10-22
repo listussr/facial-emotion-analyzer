@@ -1,24 +1,27 @@
-from abc import ABC, abstractmethod
-import psycopg2
-from psycopg2.extras import RealDictCursor
-from typing import Any, Dict
-
 import logging
+import psycopg2
+
+from abc import ABC
+from abc import abstractmethod
+from typing import Any
+from typing import Dict
+
+from psycopg2.extras import RealDictCursor
 
 class AbstractDBHandler(ABC):
-    def __init__(self, host: str = 'localhost', port: int = 5433, database: str = "emotions", 
+    def __init__(self, host: str = "localhost", port: int = 5433, database: str = "emotions", 
                  user: str = "app_user", password: str = "basic_app_password"):
         self._connection_params = {
-            'host': host,
-            'port': port,
-            'database': database,
-            'user': user,
-            'password': password
+            "host": host,
+            "port": port,
+            "database": database,
+            "user": user,
+            "password": password
         }
 
     def connect(self):
         try:
-            self._conn = psycopg2.connect(**self._connection_params)
+            self._conn   = psycopg2.connect(**self._connection_params)
             self._cursor = self._conn.cursor(cursor_factory=RealDictCursor)
             logging.info(f"Connected to database")
         except Exception as e:
@@ -26,9 +29,9 @@ class AbstractDBHandler(ABC):
             raise
 
     def close(self):
-        if hasattr(self, '_cursor'):
+        if hasattr(self, "_cursor"):
             self._cursor.close()
-        if hasattr(self, '_conn'):
+        if hasattr(self, "_conn"):
             self._conn.close()
         logging.info("Connection closed")
     

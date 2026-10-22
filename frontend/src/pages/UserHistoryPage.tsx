@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { api } from '@/api/client';
-import { TrackHistory, UserHistoryDetail } from '@/types';
+import { TrackHistory, UserHistoryDetail, HistoryModality } from '@/types';
+
+const MODALITY_LABEL: Record<HistoryModality, string> = { face: 'Лицо', fused: 'Итог (лицо + голос)' };
 import EmotionBars from '@/components/EmotionBars';
 import EmotionTimeline from '@/components/EmotionTimeline';
 import EmotionLines from '@/components/charts/EmotionLines';
@@ -13,18 +15,19 @@ export default function UserHistoryPage() {
   const [data, setData] = useState<UserHistoryDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [range, setRange] = useState<[number, number] | null>(null);
+  const [modality, setModality] = useState<HistoryModality>('face');
 
   useEffect(() => {
     if (!userId) return;
     let alive = true;
     api
-      .userHistory(userId)
+      .userHistory(userId, modality)
       .then((d) => alive && setData(d))
       .catch((e) => alive && setError(e?.message || 'fetch failed'));
     return () => {
       alive = false;
     };
-  }, [userId]);
+  }, [userId, modality]);
 
   if (error) {
     return (
@@ -66,11 +69,29 @@ export default function UserHistoryPage() {
             <p className="text-sm text-slate-500 font-mono">{data.user_id}</p>
           </div>
         </div>
+        <div className="flex items-center gap-2 flex-wrap">
+        {(data.available_modalities?.length ?? 0) > 1 && (
+          <div className="seg" title="Эмоции лица или итог после слияния с голосом">
+            {(['face', 'fused'] as HistoryModality[]).map((m) => (
+              <button
+                key={m}
+                type="button"
+                className={modality === m ? 'active' : ''}
+                onClick={() => {
+                  setRange(null);
+                  setModality(m);
+                }}
+              >
+                {MODALITY_LABEL[m]}
+              </button>
+            ))}
+          </div>
+        )}
         <a
           href={api.userExportCsvUrl(data.user_id)}
           download
           className="btn btn-ghost text-sm"
-          title="Экспортировать все сэмплы в CSV"
+          title="Экспортировать все сэмплы (все модальности) в CSV"
         >
           <svg width={16} height={16} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
             <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
@@ -79,6 +100,7 @@ export default function UserHistoryPage() {
           </svg>
           Скачать CSV
         </a>
+        </div>
       </div>
 
       <div className="grid lg:grid-cols-3 gap-6">

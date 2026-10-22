@@ -3,8 +3,11 @@ import { useSessions } from '@/hooks/useSessions';
 import { api } from '@/api/client';
 import Toggle from '@/components/Toggle';
 import { useUiPrefs } from '@/hooks/useUiPrefs';
-import { EMOTION_MODELS, MODEL_CHIP } from '@/data/models';
-import type { TrackerName, EmotionModel, Device } from '@/types';
+import ProcessingOptions, { MODALITY_LABEL } from '@/components/ProcessingOptions';
+import {
+  EMOTION_MODELS, MODEL_CHIP, DEFAULT_EMOTION_MODEL, DEFAULT_VOICE_MODEL, DEFAULT_CLIP_FRAMES, DEFAULT_FUSION_METHOD,
+} from '@/data/models';
+import type { TrackerName, EmotionModel, Device, Modality, VoiceModel, ClipFrames, FusionMethod } from '@/types';
 
 const TRACKER_LABEL: Record<TrackerName, string> = { deepsort: 'DeepSORT', bytetrack: 'ByteTrack' };
 const MODEL_OPTIONS = EMOTION_MODELS;
@@ -18,8 +21,13 @@ export default function SettingsPage() {
   const [frameRate, setFrameRate] = useState(20);
   const [frameRateError, setFrameRateError] = useState<string | null>(null);
   const [tracker, setTracker] = useState<TrackerName>('bytetrack');
-  const [model, setModel] = useState<EmotionModel>('resnet-18');
+  const [model, setModel] = useState<EmotionModel>(DEFAULT_EMOTION_MODEL);
   const [device, setDevice] = useState<Device>('cpu');
+  const [modalities, setModalities] = useState<Modality[]>(['video', 'audio']);
+  const [voiceModel, setVoiceModel] = useState<VoiceModel>(DEFAULT_VOICE_MODEL);
+  const [identification, setIdentification] = useState(true);
+  const [clipFrames, setClipFrames] = useState<ClipFrames>(DEFAULT_CLIP_FRAMES);
+  const [fusionMethod, setFusionMethod] = useState<FusionMethod>(DEFAULT_FUSION_METHOD);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -42,7 +50,10 @@ export default function SettingsPage() {
         name: name.trim(),
         source: source.trim(),
         frame_rate: frameRate,
-        config: { tracker, model, device },
+        config: {
+          tracker, model, device, modalities, voice_model: voiceModel, identification,
+          clip_frames: clipFrames, fusion_method: fusionMethod,
+        },
       });
       setName('');
       setSource('');
@@ -118,6 +129,14 @@ export default function SettingsPage() {
                   <span className="chip chip-on">{TRACKER_LABEL[c.tracker]}</span>
                   <span className="chip">{MODEL_CHIP[c.model] || c.model}</span>
                   <span
+                    className={`chip ${c.degraded ? 'chip-warn' : ''}`}
+                    title={c.degraded ? 'Источник не дал часть запрошенных модальностей' : ''}
+                  >
+                    {(c.modalities && c.modalities.length ? c.modalities : c.requestedModalities || [])
+                      .map((m) => MODALITY_LABEL[m])
+                      .join(' + ')}
+                  </span>
+                  <span
                     className={
                       c.status === 'live'
                         ? 'chip chip-ok'
@@ -150,7 +169,7 @@ export default function SettingsPage() {
               label="Источник"
               value={source}
               onChange={setSource}
-              placeholder="rtsp://… или 0 / путь к файлу"
+              placeholder="rtsp://…, 0 (вебкамера), mic (микрофон) или путь к файлу"
             />
             <SelectField
               label="Трекер"
@@ -207,6 +226,20 @@ export default function SettingsPage() {
               </div>
             </div>
           </div>
+          <div className="mt-4 md:w-1/2">
+            <ProcessingOptions
+              modalities={modalities}
+              onModalitiesChange={setModalities}
+              voiceModel={voiceModel}
+              onVoiceModelChange={setVoiceModel}
+              identification={identification}
+              onIdentificationChange={setIdentification}
+              clipFrames={clipFrames}
+              onClipFramesChange={setClipFrames}
+              fusionMethod={fusionMethod}
+              onFusionMethodChange={setFusionMethod}
+            />
+          </div>
           <div className="mt-4 flex gap-2">
             <button
               className="btn btn-primary disabled:opacity-50"
@@ -221,8 +254,9 @@ export default function SettingsPage() {
         <aside className="glass p-6">
           <h3 className="font-bold mb-4">Глобальные значения</h3>
           <p className="text-xs text-slate-500 mb-4">
-            Сейчас параметры обработки задаются на уровне процесса <code>consumer.py</code>.
-            Per-session маршрутизация — следующий этап.
+            Параметры обработки задаются для каждой сессии при её создании (публикуются
+            в <code>session-config</code>). Значения по умолчанию — в переменных окружения
+            сервисов обработки.
           </p>
           <div className="space-y-4">
             <div>

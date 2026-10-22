@@ -1,13 +1,17 @@
+"""WebSocket с результатами аналитики сессии."""
+
 import asyncio
 import logging
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter
+from fastapi import WebSocket
+from fastapi import WebSocketDisconnect
 
 from ..services.session_manager import session_manager
 from ..services.events_dispatcher import events_dispatcher
 
 router = APIRouter(prefix="/api/events", tags=["events"])
-log = logging.getLogger("events")
+log    = logging.getLogger("events")
 
 
 @router.websocket("/{session_id}")

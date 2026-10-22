@@ -75,7 +75,7 @@ export default function StreamGrid({
               </span>
             </header>
 
-            <StreamTile source={s} liveSrc={live ? api.streamUrl(s.id) : undefined} hideLabels={compact} />
+            <StreamTile source={s} live={Boolean(live)} hideLabels={compact} />
 
             <div className="mt-3 flex gap-1.5 flex-wrap px-1">
               {s.kind === 'camera' && (
