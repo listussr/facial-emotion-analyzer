@@ -1,42 +1,56 @@
+"""Реестр сессий веб-сервера: продюсеры и конфиги обработки в session-config."""
+
 from __future__ import annotations
 
-import asyncio
 import logging
 import threading
 import uuid
-from dataclasses import dataclass, field
+
+from dataclasses import dataclass
+from dataclasses import field
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Union
+from typing import Dict
+from typing import List
+from typing import Optional
+from typing import Union
 
-import cv2
-
-from src.video_producing import CameraProducer, CameraConfig
+from src.session_config import AudioSettings
+from src.session_config import FusionSettings
+from src.session_config import SessionConfig as ProcessingConfig
+from src.session_config import SessionConfigPublisher
+from src.session_config import VisionSettings
+from src.session_config import next_revision
+from src.video_producing import CameraConfig
+from src.video_producing import CameraProducer
 from ..config import settings
-from ..schemas import SessionConfig, SessionInfo, SessionKind
+from ..schemas import SessionConfig
+from ..schemas import SessionInfo
+from ..schemas import SessionKind
+from .media_probe import check_modalities
+from .media_probe import probe_source
 
 
-def _probe_source(source: Union[str, int]) -> None:
+def build_processing_config(camera_id: str, config: SessionConfig) -> ProcessingConfig:
     """
-    Открывает источник через cv2.VideoCapture, проверяет, что он отдаёт хотя бы
-    один кадр, и закрывает. Пробрасывает исключение, если источник недоступен —
-    тогда мы откажем в создании сессии заранее, не оставляя «зависшую» камеру.
+    Конфиг обработки для session-config из настроек API.
+
+    Args:
+        camera_id (str)          : Идентификатор сессии.
+        config    (SessionConfig): Настройки из API.
+
+    Returns:
+        ProcessingConfig: Секции vision, audio и fusion для сервисов обработки.
     """
-    src: Union[str, int] = source
-    if isinstance(src, str) and src.isdigit():
-        src = int(src)
-    cap = cv2.VideoCapture(src)
-    try:
-        if not cap.isOpened():
-            raise RuntimeError(f"Не удалось открыть источник: {source!r}")
-        ok, _ = cap.read()
-        if not ok:
-            raise RuntimeError(
-                f"Источник открылся, но не отдаёт кадры: {source!r}. "
-                f"Возможно, камера занята или не подключена."
-            )
-    finally:
-        cap.release()
+    fusion = FusionSettings(method=config.fusion_method) if config.fusion_method else None
+    return ProcessingConfig(
+        camera_id=camera_id,
+        revision=next_revision(None),
+        vision=VisionSettings(tracker=config.tracker, model=config.model, device=config.device,
+                              identification=config.identification, clip_frames=config.clip_frames),
+        audio=AudioSettings(model=config.voice_model, device=config.device),
+        fusion=fusion,
+    )
 
 
 @dataclass
@@ -53,7 +67,7 @@ class _Session:
     file_size: Optional[int] = None
 
     def info(self) -> SessionInfo:
-        thread_alive = bool(self.producer.thread and self.producer.thread.is_alive())
+        thread_alive   = bool(self.producer.thread and self.producer.thread.is_alive())
         producer_alive = bool(self.producer.is_running) and thread_alive
 
         if self.kind == "camera":
@@ -71,25 +85,31 @@ class _Session:
             else:
                 status = "done"
 
-        frames_sent = int(getattr(self.producer, "frame_count", 0) or 0)
-        errors = int(getattr(self.producer, "error_count", 0) or 0)
-        fps = 0.0
-        progress = 0.0
+        frames_sent  = int(getattr(self.producer, "frame_count", 0) or 0)
+        errors       = int(getattr(self.producer, "error_count", 0) or 0)
+        fps          = 0.0
+        progress     = 0.0
         position_sec = 0.0
         duration_sec = None
+        modalities: List[str] = []
+        degraded      = False
+        audio_seconds = 0.0
         try:
             stats_fn = getattr(self.producer, "get_stats", None)
             if callable(stats_fn):
-                stats = stats_fn() or {}
-                fps = float(stats.get("current_fps") or 0.0)
-                progress = float(stats.get("progress") or 0.0)
-                position_sec = float(stats.get("position_sec") or 0.0)
-                vd = stats.get("video_duration_sec")
-                duration_sec = float(vd) if vd is not None else None
+                stats         = stats_fn() or {}
+                fps           = float(stats.get("current_fps") or 0.0)
+                progress      = float(stats.get("progress") or 0.0)
+                position_sec  = float(stats.get("position_sec") or 0.0)
+                vd            = stats.get("video_duration_sec")
+                duration_sec  = float(vd) if vd is not None else None
+                modalities    = list(stats.get("modalities") or [])
+                degraded      = bool(stats.get("degraded"))
+                audio_seconds = float((stats.get("audio") or {}).get("seconds_sent") or 0.0)
         except Exception:
             pass
 
-        if self.kind == "upload" and status == "done" and progress == 0.0 and frames_sent > 0:
+        if self.kind == "upload" and status == "done" and progress == 0.0 and (frames_sent > 0 or audio_seconds > 0):
             progress = 1.0
 
         return SessionInfo(
@@ -109,6 +129,9 @@ class _Session:
             filename=self.filename,
             duration_sec=duration_sec,
             file_size=self.file_size,
+            modalities=modalities,
+            degraded=degraded,
+            audio_seconds_sent=audio_seconds,
         )
 
 
@@ -118,7 +141,17 @@ class SessionManager:
     def __init__(self) -> None:
         self._sessions: Dict[str, _Session] = {}
         self._lock = threading.Lock()
-        self._log = logging.getLogger("SessionManager")
+        self._log  = logging.getLogger("SessionManager")
+        self._publisher: Optional[SessionConfigPublisher] = None
+        self._publisher_lock = threading.Lock()
+
+    def _config_publisher(self) -> SessionConfigPublisher:
+        with self._publisher_lock:
+            if self._publisher is None:
+                self._publisher = SessionConfigPublisher(
+                    settings.KAFKA_BOOTSTRAP, topic=settings.TOPIC_SESSION_CONFIG
+                )
+            return self._publisher
 
     def create_camera(
         self,
@@ -140,10 +173,10 @@ class SessionManager:
         if not upload_path.exists():
             raise FileNotFoundError(f"Uploaded file not found: {upload_path}")
         camera_id = f"upload_{uuid.uuid4().hex[:6]}"
-        info = self._spawn(camera_id, "upload", name, str(upload_path), frame_rate, config)
+        info      = self._spawn(camera_id, "upload", name, str(upload_path), frame_rate, config)
         with self._lock:
-            sess = self._sessions[camera_id]
-            sess.filename = upload_path.name
+            sess           = self._sessions[camera_id]
+            sess.filename  = upload_path.name
             sess.file_size = upload_path.stat().st_size
         return sess.info()
 
@@ -156,15 +189,24 @@ class SessionManager:
         frame_rate: int,
         config: SessionConfig,
     ) -> SessionInfo:
-        _probe_source(source)
+        """
+        Запуск сессии: проверка модальностей источника, публикация конфига, старт продюсера.
+
+        Конфиг публикуется до первого кадра: консьюмеры читают настройки из session-config.
+        """
+        probe = probe_source(source)
+        check_modalities(probe, config.modalities)
+
+        self._config_publisher().publish(build_processing_config(camera_id, config))
 
         cam_cfg = CameraConfig(
             camera_id=camera_id,
             source=source,
             kafka_servers=settings.KAFKA_BOOTSTRAP,
-            topic_name=settings.TOPIC_RAW,
-            partition=0,
-            total_partitions=1,
+            video_topic=settings.TOPIC_RAW,
+            audio_topic=settings.TOPIC_AUDIO_RAW,
+            events_topic=settings.TOPIC_SESSION_EVENTS,
+            modalities=tuple(config.modalities),
             frame_rate=frame_rate,
             quality=settings.DEFAULT_QUALITY,
             max_width=settings.DEFAULT_MAX_WIDTH,
@@ -173,11 +215,16 @@ class SessionManager:
             reconnect_timeout=5,
             stop_on_end=(kind == "upload"),
         )
-        producer = CameraProducer(cam_cfg)
-        producer.start()
+        try:
+            producer = CameraProducer(cam_cfg)
+            producer.start()
+        except Exception:
+            self._delete_config(camera_id)
+            raise
         self._log.info(
-            f"Spawned producer for {camera_id}: "
-            f"source={source!r}, frame_rate={frame_rate}, kind={kind}"
+            f"Spawned producer for {camera_id}: source={source!r}, frame_rate={frame_rate}, "
+            f"kind={kind}, modalities={config.modalities} "
+            f"(source has video={probe.has_video}, audio={probe.has_audio})"
         )
 
         sess = _Session(
@@ -206,13 +253,8 @@ class SessionManager:
             sess = self._sessions.get(session_id)
         return sess.info() if sess else None
 
-
     def detach(self, session_id: str) -> Optional[CameraProducer]:
-        """
-        Снимает сессию из реестра и возвращает её продюсер. Не вызывает
-        тяжёлый `producer.stop()` — это надо сделать вызывающему коду
-        (например, в фоновой задаче), чтобы не блокировать API.
-        """
+        """Сессия снимается из реестра без остановки продюсера: её делает вызывающий код в фоне."""
         with self._lock:
             sess = self._sessions.pop(session_id, None)
         if sess is None:
@@ -220,18 +262,27 @@ class SessionManager:
         self._log.info(f"Session detached: {session_id}")
         return sess.producer
 
-    @staticmethod
-    def shutdown_producer(producer: CameraProducer, log_id: str = "") -> None:
-        """Безопасно останавливает один продюсер. Может занять до ~15 секунд."""
-        log = logging.getLogger("SessionManager")
+    def _delete_config(self, session_id: str) -> None:
+        try:
+            self._config_publisher().delete(session_id)
+        except Exception as e:
+            self._log.warning(f"Failed to delete session config {session_id}: {e}")
+
+    def shutdown_producer(self, producer: CameraProducer, log_id: str = "") -> None:
+        """
+        Остановка продюсера и удаление конфига сессии.
+
+        Конфиг удаляется после stream_end, чтобы консьюмеры дообработали последние кадры с настройками сессии.
+        """
         try:
             producer.stop()
-            log.info(f"Producer stopped: {log_id}")
+            self._log.info(f"Producer stopped: {log_id}")
         except Exception as e:
-            log.warning(f"Error stopping producer {log_id}: {e}")
+            self._log.warning(f"Error stopping producer {log_id}: {e}")
+        if log_id:
+            self._delete_config(log_id)
 
     def stop(self, session_id: str) -> bool:
-        """Синхронная остановка — оставлена для совместимости (lifespan etc.)."""
         producer = self.detach(session_id)
         if producer is None:
             return False
@@ -243,6 +294,10 @@ class SessionManager:
             ids = list(self._sessions.keys())
         for sid in ids:
             self.stop(sid)
+        with self._publisher_lock:
+            if self._publisher is not None:
+                self._publisher.close()
+                self._publisher = None
 
 
 session_manager = SessionManager()

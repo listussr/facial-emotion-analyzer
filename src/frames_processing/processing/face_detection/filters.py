@@ -1,23 +1,20 @@
-import numpy as np
+"""Быстрые эвристики «похоже ли изображение на лицо» по градиентам."""
+
 import cv2
+import numpy as np
+
 
 def fast_face_filter(gray: np.ndarray, width: int, height: int) -> bool:
     """
-    #### Фильтр для определения, есть ли на ЧБ изображении лицо.
-    
-    Грубая аппроксимация применения оператора Собеля и вычисления среднего значения <br>
-    градиентов по вертикали и по горизонтали.
+    Грубая проверка лица: слишком ровные градиенты по вертикали и горизонтали — не лицо.
 
-    Если градиенты слишком ровные, то изображение не может быть лицом.
+    Args:
+        gray   (np.ndarray): Кроп в оттенках серого.
+        width  (int)       : Ширина рамки.
+        height (int)       : Высота рамки.
 
-    :param gray: Исследуемое изображение в ЧБ. 
-    :type gray: np.ndarray
-    :param width: Ширина изображения.
-    :type width: int
-    :param height: Высота изображения.
-    :type height: int
-    :return: Флаг наличия изображения.
-    :rtype: bool
+    Returns:
+        bool: Похоже ли на лицо.
     """
     if max(width, height) > 64:
         gray = cv2.resize(gray, (64, 64), cv2.INTER_AREA)
@@ -31,24 +28,19 @@ def fast_face_filter(gray: np.ndarray, width: int, height: int) -> bool:
 
     return True
 
+
 def pass_face_filters(gray: np.ndarray, width: int, height: int) -> bool:
     """
-    #### Более продвинутый метод определения наличия лица на изображении.
+    Проверка лица голосованием 2 из 3: горизонтальные градиенты верха, контраст центра против краёв,
+    вертикальные градиенты.
 
-    Используются 3 условия. Для наличия лица достаточно выполнения 2/3.
+    Args:
+        gray   (np.ndarray): Кроп в оттенках серого.
+        width  (int)       : Ширина рамки.
+        height (int)       : Высота рамки.
 
-    1) В среднем горизонтальные градиенты в верхней части изображения больше порогового числа.
-    2) Первый центральные момент центра изображения больше 0.9 * первый центральный момент краёв изображения.
-    3) В среднем вертикальные градиенты изображения больше порогового значения.
-    
-    :param gray: Исследуемое изображение в ЧБ. 
-    :type gray: np.ndarray
-    :param width: Ширина изображения.
-    :type width: int
-    :param height: Высота изображения.
-    :type height: int
-    :return: Флаг наличия изображения.
-    :rtype: bool
+    Returns:
+        bool: Похоже ли на лицо.
     """
     if max(width, height) > 96:
         gray = cv2.resize(gray, (96, 96), interpolation=cv2.INTER_AREA)
@@ -60,7 +52,7 @@ def pass_face_filters(gray: np.ndarray, width: int, height: int) -> bool:
         votes += 1
 
     center = gray[:, gray.shape[1]//3 : 2*gray.shape[1]//3]
-    sides = np.hstack([gray[:, :gray.shape[1] // 3], gray[:, 2 * gray.shape[1] // 3:]])
+    sides  = np.hstack([gray[:, :gray.shape[1] // 3], gray[:, 2 * gray.shape[1] // 3:]])
     if np.mean(np.abs(center - center.mean())) > 0.9 * np.mean(np.abs(sides - sides.mean())):
         votes += 1
 

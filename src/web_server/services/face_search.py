@@ -1,14 +1,18 @@
+"""Поиск пользователей в БД по фотографии лица."""
+
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional
-
 import cv2
 import numpy as np
 
+from typing import Any
+from typing import Dict
+from typing import List
+from typing import Optional
+
 from src.frames_processing.processing.face_detection import FaceDetector
 from src.frames_processing.processing.face_identification._face_encoder import FaceEncoder
-
 from .db import get_cursor
 
 
@@ -16,7 +20,7 @@ _log = logging.getLogger("face_search")
 
 
 class FaceSearch:
-    """Лениво инициализирует тяжёлые модели — детектор и энкодер."""
+    """Поиск по лицу; детектор и энкодер загружаются при первом запросе."""
 
     def __init__(self) -> None:
         self._detector: Optional[FaceDetector] = None
@@ -35,36 +39,42 @@ class FaceSearch:
         img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
         if img is None:
             raise ValueError("Не удалось декодировать изображение (поддерживаются JPEG/PNG).")
-        return img  # BGR — пайплайн тоже хранит/ищет в BGR-эмбеддингах
+        return img
 
     def _largest_face_crop(self, img: np.ndarray) -> np.ndarray:
         assert self._detector is not None
-        detections = self._detector.detect(img, scale=1.0)
+        detections = self._detector.detect(img)
         if not detections:
             raise ValueError("На изображении не найдено лиц.")
 
         x, y, w, h, _ = max(detections, key=lambda d: d[2] * d[3])
-        h_img, w_img = img.shape[:2]
-        x1, y1 = max(0, int(x)), max(0, int(y))
-        x2, y2 = min(w_img, int(x + w)), min(h_img, int(y + h))
-        crop = img[y1:y2, x1:x2]
+        h_img, w_img  = img.shape[:2]
+        x1, y1        = max(0, int(x)), max(0, int(y))
+        x2, y2        = min(w_img, int(x + w)), min(h_img, int(y + h))
+        crop          = img[y1:y2, x1:x2]
         if crop.size == 0:
             raise ValueError("Лицо обрезано вырожденно — попробуйте другую картинку.")
         return crop
 
     def search(self, raw_bytes: bytes, top_k: int) -> List[Dict[str, Any]]:
         """
-        Возвращает топ-K похожих пользователей с агрегированными метриками.
-        Список отсортирован по убыванию косинусной близости.
+        Поиск похожих пользователей по фото.
+
+        Args:
+            raw_bytes (bytes): Изображение JPEG или PNG.
+            top_k     (int)  : Сколько пользователей вернуть.
+
+        Returns:
+            List[Dict[str, Any]]: Пользователи по убыванию схожести с метриками истории.
         """
         self._ensure_loaded()
         assert self._encoder is not None
 
-        img = self._decode_image(raw_bytes)
+        img  = self._decode_image(raw_bytes)
         crop = self._largest_face_crop(img)
 
         crop_resized = cv2.resize(crop, (160, 160), interpolation=cv2.INTER_AREA)
-        embedding = self._encoder.get_embedding(crop_resized.astype(np.float32))
+        embedding    = self._encoder.get_embedding(crop_resized.astype(np.float32))
 
         with get_cursor() as cur:
             cur.execute(

@@ -1,42 +1,65 @@
+"""Источник медиа из файла или сетевого потока через PyAV."""
+
 import logging
 import time
-from typing import Iterator, List, Optional, Union
-
 import av
+import numpy as np
+
+from functools import partial
+from typing import Iterator
+from typing import List
+from typing import Optional
+from typing import Tuple
+from typing import Union
 
 from ..audio_chunker import AudioChunker
-from .base import AudioChunk, MediaSource, SourceInfo, VideoFrame
+from .base import AudioChunk
+from .base import MediaSource
+from .base import SourceInfo
+from .base import VideoFrame
 
-_LIVE_PREFIXES = ('rtsp://', 'rtsps://', 'rtmp://', 'http://', 'https://', 'udp://', 'srt://')
+_LIVE_PREFIXES = ("rtsp://", "rtsps://", "rtmp://", "http://", "https://", "udp://", "srt://")
+
+
+def fit_size(width: int, height: int, max_size: Optional[Tuple[int, int]]) -> Tuple[int, int]:
+    """
+    Размер, вписанный в max_size с сохранением пропорций; чётный — для swscale и JPEG.
+
+    Args:
+        width    (int)                  : Ширина кадра.
+        height   (int)                  : Высота кадра.
+        max_size (Optional[Tuple[int, int]]): Предельные (ширина, высота) или None.
+
+    Returns:
+        Tuple[int, int]: Новые (ширина, высота).
+    """
+    if not max_size or (width <= max_size[0] and height <= max_size[1]):
+        return width, height
+    scale = min(max_size[0] / width, max_size[1] / height)
+    return max(2, int(width * scale) // 2 * 2), max(2, int(height * scale) // 2 * 2)
 
 
 class FileSource(MediaSource):
+    """
+    Источник из файла или сетевого потока через PyAV.
+
+    Видео и аудио демультиплексируются в одном цикле, pts обоих потоков считаются от общего нуля.
+    Кадр вписывается в max_size самим декодером вместе с переводом в BGR — в разы дешевле cv2.resize.
+    """
+
     def __init__(self, path: str, sample_rate: int, channels: int, samples_per_chunk: int,
-                 rtsp_transport: str = 'tcp', open_timeout_s: float = 10.0):
-        """
-        Источник из файла или сетевого потока через PyAV (ffmpeg).
-
-        Видео и аудио демультиплексируются в одном цикле, поэтому события
-        выходят примерно в порядке времени. `pts_ms` обоих потоков считаются
-        от общего нуля — минимального стартового времени выбранных потоков.
-
-        Args:
-            path (str): Путь к файлу или URL (rtsp://, http:// и т.п.).
-            sample_rate (int): Частота дискретизации аудио на выходе, Гц.
-            channels (int): Количество аудиоканалов на выходе (1 или 2).
-            samples_per_chunk (int): Сэмплов (на канал) в одном аудиочанке.
-            rtsp_transport (str): Транспорт для RTSP ('tcp' / 'udp').
-            open_timeout_s (float): Таймаут открытия и чтения сетевого потока.
-        """
-        self._path = path
-        self._sample_rate = sample_rate
-        self._channels = channels
+                 rtsp_transport: str = "tcp", open_timeout_s: float = 10.0,
+                 max_size: Optional[Tuple[int, int]] = None):
+        self._path              = path
+        self._sample_rate       = sample_rate
+        self._channels          = channels
         self._samples_per_chunk = samples_per_chunk
-        self._rtsp_transport = rtsp_transport
-        self._open_timeout_s = open_timeout_s
+        self._rtsp_transport    = rtsp_transport
+        self._open_timeout_s    = open_timeout_s
+        self._max_size          = max_size
 
-        self._is_live = path.lower().startswith(_LIVE_PREFIXES)
-        self._container = None
+        self._is_live      = path.lower().startswith(_LIVE_PREFIXES)
+        self._container    = None
         self._video_stream = None
         self._audio_stream = None
         self._resampler: Optional[av.AudioResampler] = None
@@ -47,8 +70,8 @@ class FileSource(MediaSource):
     def open(self, want_video: bool, want_audio: bool) -> SourceInfo:
         options = {}
         if self._is_live:
-            if self._path.lower().startswith(('rtsp://', 'rtsps://')):
-                options['rtsp_transport'] = self._rtsp_transport
+            if self._path.lower().startswith(("rtsp://", "rtsps://")):
+                options["rtsp_transport"] = self._rtsp_transport
             timeout = (self._open_timeout_s, self._open_timeout_s)
         else:
             timeout = None
@@ -59,15 +82,15 @@ class FileSource(MediaSource):
         has_audio = bool(self._container.streams.audio)
 
         if want_video and has_video:
-            self._video_stream = self._container.streams.video[0]
-            self._video_stream.thread_type = 'AUTO'
+            self._video_stream             = self._container.streams.video[0]
+            self._video_stream.thread_type = "AUTO"
         if want_audio and has_audio:
             self._audio_stream = self._container.streams.audio[0]
-            layout = 'mono' if self._channels == 1 else 'stereo'
-            self._resampler = av.AudioResampler(format='s16', layout=layout, rate=self._sample_rate)
-            self._chunker = AudioChunker(self._sample_rate, self._channels, self._samples_per_chunk)
+            layout             = "mono" if self._channels == 1 else "stereo"
+            self._resampler    = av.AudioResampler(format="s16", layout=layout, rate=self._sample_rate)
+            self._chunker      = AudioChunker(self._sample_rate, self._channels, self._samples_per_chunk)
 
-        self._zero_s = self._compute_zero()
+        self._zero_s  = self._compute_zero()
         self._wall_t0 = time.time()
 
         info = SourceInfo(has_video=has_video, has_audio=has_audio, is_live=self._is_live)
@@ -131,7 +154,8 @@ class FileSource(MediaSource):
                     yield VideoFrame(
                         pts_ms=pts_ms_i,
                         capture_wall_ts=self._wall_ts(pts_ms),
-                        image=frame.to_ndarray(format='bgr24'),
+                        loader=partial(self._to_bgr, frame),
+                        original_size=(frame.width, frame.height),
                     )
             elif packet.stream is self._audio_stream:
                 for frame in packet.decode():
@@ -143,10 +167,17 @@ class FileSource(MediaSource):
             if tail is not None:
                 yield tail
 
+    def _to_bgr(self, frame) -> np.ndarray:
+        size = fit_size(frame.width, frame.height, self._max_size)
+        if size == (frame.width, frame.height):
+            return frame.to_ndarray(format="bgr24")
+        return frame.reformat(width=size[0], height=size[1], format="bgr24",
+                              interpolation="AREA").to_ndarray()
+
     def _resample(self, frame) -> Iterator[AudioChunk]:
         for out in self._resampler.resample(frame):
             pts_ms = self._rel_ms(out.time) if out.pts is not None else None
-            pcm = out.to_ndarray().tobytes()
+            pcm    = out.to_ndarray().tobytes()
             yield from self._chunker.push(pcm, pts_ms, self._wall_ts(pts_ms))
 
     def close(self) -> None:

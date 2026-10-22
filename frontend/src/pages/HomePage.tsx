@@ -60,7 +60,7 @@ export default function HomePage() {
                   {c.kind === 'camera' ? c.status : ''}
                 </span>
               </div>
-              <StreamTile source={c} liveSrc={api.streamUrl(c.id)} hideLabels />
+              <StreamTile source={c} live hideLabels />
             </Link>
           ))}
         </PreviewBlock>
@@ -81,7 +81,7 @@ export default function HomePage() {
                   {u.kind === 'upload' ? `${Math.round(u.progress * 100)}%` : ''}
                 </span>
               </div>
-              <StreamTile source={u} liveSrc={api.streamUrl(u.id)} hideLabels />
+              <StreamTile source={u} live hideLabels />
             </Link>
           ))}
         </PreviewBlock>

@@ -1,23 +1,26 @@
-"""
-Аудиопайплайн: raw-audio-chunks → буфер камеры → окна → VAD → модель эмоций
-→ сглаживание → audio-analytics.
+"""Аудиопайплайн: чанки -> окна -> VAD -> модель эмоций -> сглаживание -> audio-analytics."""
 
-Аудиопоток лёгкий (10 чанков/с на камеру), поэтому один поток обработки;
-отправка в Kafka асинхронная силами librdkafka.
-"""
 import logging
 import threading
 import time
-from dataclasses import dataclass, replace
-from typing import Any, Dict, List, Optional, Set, Tuple
-
 import msgpack
 import numpy as np
 
-from src.emotion_labels import label_of
-from src.frames_processing.stream_metrics import LatencyWindow, StalenessFilter
-from src.session_config import AudioSettings, SessionConfig, SessionConfigStore
+from dataclasses import dataclass
+from dataclasses import replace
+from typing import Any
+from typing import Dict
+from typing import List
+from typing import Optional
+from typing import Set
+from typing import Tuple
 
+from src.emotion_labels import label_of
+from src.frames_processing.stream_metrics import LatencyWindow
+from src.frames_processing.stream_metrics import StalenessFilter
+from src.session_config import AudioSettings
+from src.session_config import SessionConfig
+from src.session_config import SessionConfigStore
 from .buffer import CameraAudioBuffer
 from .contracts import AudioAnalytics
 from .recognizer import VoiceEmotionRecognizer
@@ -27,7 +30,11 @@ from .vad import EnergyVAD
 _log = logging.getLogger("audio.pipeline")
 
 WINDOW_MS_RANGE = (200, 10_000)
-HOP_MS_MIN = 50
+HOP_MS_MIN      = 50
+
+
+def _rounded(values) -> List[float]:
+    return [round(float(v), 5) for v in values]
 
 
 @dataclass
@@ -42,32 +49,27 @@ class _Session:
 
 
 class AudioPipeline:
+    """
+    Аудиопайплайн камер.
+
+    Аудиопоток лёгкий, поэтому обработка в одном потоке. Без kafka_settings handle_chunk и handle_event
+    вызываются напрямую. Окно без речи по VAD или по предобработке модели публикуется с is_speech=False.
+    """
+
     def __init__(self, kafka_settings: Optional[Dict], defaults: AudioSettings,
                  session_store: Optional[SessionConfigStore] = None,
                  max_chunk_age_ms: Optional[int] = 2000, num_threads: Optional[int] = None,
                  vad_threshold_dbfs: float = -45.0, sample_rate: int = 16000,
                  session_idle_timeout_s: float = 30.0):
-        """
-        Args:
-            kafka_settings: bootstrap_servers, input_topic, output_topic, events_topic, group_id;
-                None — без Kafka (для тестов: handle_chunk / handle_event вызываются напрямую).
-            defaults: Значения по умолчанию консьюмера; все поля должны быть заданы.
-            session_store: Хранилище конфигов сессий (секция audio).
-            max_chunk_age_ms: Чанки старше этого возраста отбрасываются; None — не отбрасывать.
-            num_threads: Потоки ONNX для реальных моделей.
-            vad_threshold_dbfs: Порог громкости кадра для VAD.
-            sample_rate: Ожидаемая частота дискретизации чанков.
-            session_idle_timeout_s: Сессия без чанков дольше этого — освобождается.
-        """
         missing = [k for k, v in vars(defaults).items() if v is None]
         if missing:
             raise ValueError(f"audio defaults must be fully specified, missing: {missing}")
-        self.defaults = self._validated('defaults', defaults, defaults)
-        self.store = session_store
-        self.sample_rate = sample_rate
-        self.num_threads = num_threads
+        self.defaults               = self._validated("defaults", defaults, defaults)
+        self.store                  = session_store
+        self.sample_rate            = sample_rate
+        self.num_threads            = num_threads
         self.session_idle_timeout_s = session_idle_timeout_s
-        self.vad = EnergyVAD(sample_rate=sample_rate, threshold_dbfs=vad_threshold_dbfs)
+        self.vad                    = EnergyVAD(sample_rate=sample_rate, threshold_dbfs=vad_threshold_dbfs)
 
         self._sessions: Dict[str, _Session] = {}
         self._dirty: Set[str] = set()
@@ -76,39 +78,36 @@ class AudioPipeline:
         self._failed: Dict[Tuple[str, str], str] = {}
         self._default_recognizer = self._recognizer(self.defaults)
 
-        self.staleness = StalenessFilter(max_chunk_age_ms)
-        self.latency = LatencyWindow()
-        self._infer_s = 0.0
-        self._audio_s = 0.0
-        self.windows_total = 0
+        self.staleness      = StalenessFilter(max_chunk_age_ms)
+        self.latency        = LatencyWindow()
+        self._infer_s       = 0.0
+        self._audio_s       = 0.0
+        self.windows_total  = 0
         self.sessions_ended = 0
 
         if session_store is not None:
             session_store.set_on_change(self._on_config_change)
 
-        self._kafka = None
+        self._kafka        = None
         self._events_topic = None
         if kafka_settings is not None:
             from src.frames_processing.kafka_io import KafkaIO
-            self._events_topic = kafka_settings.get('events_topic')
+            self._events_topic = kafka_settings.get("events_topic")
             self._kafka = KafkaIO(
-                kafka_settings['bootstrap_servers'], kafka_settings['input_topic'],
-                kafka_settings['output_topic'], kafka_settings.get('group_id', 'audio-pipeline'),
+                kafka_settings["bootstrap_servers"], kafka_settings["input_topic"],
+                kafka_settings["output_topic"], kafka_settings.get("group_id", "audio-pipeline"),
                 extra_input_topics=[self._events_topic] if self._events_topic else None,
             )
         _log.info(f"Audio pipeline: defaults={self.defaults}, events_topic={self._events_topic}, "
                   f"max_chunk_age_ms={max_chunk_age_ms}, session_store={'on' if session_store else 'off'}")
 
-    # --- настройки сессий ---
-
     def _on_config_change(self, camera_id: str, old: Optional[SessionConfig],
                           new: Optional[SessionConfig]) -> None:
-        """Колбэк хранилища (фоновый поток): пересчитать настройки на следующем чанке."""
         with self._dirty_lock:
             self._dirty.add(camera_id)
 
     def _resolve(self, camera_id: str) -> AudioSettings:
-        cfg = self.store.get(camera_id) if self.store is not None else None
+        cfg     = self.store.get(camera_id) if self.store is not None else None
         session = cfg.audio if cfg is not None and cfg.audio is not None else AudioSettings()
         return self._validated(camera_id, session.merged_over(self.defaults), self.defaults)
 
@@ -116,14 +115,14 @@ class AudioPipeline:
     def _validated(camera_id: str, s: AudioSettings, defaults: AudioSettings) -> AudioSettings:
         fixes: Dict[str, Any] = {}
         if not isinstance(s.window_ms, int) or not WINDOW_MS_RANGE[0] <= s.window_ms <= WINDOW_MS_RANGE[1]:
-            fixes['window_ms'] = defaults.window_ms
-        window = fixes.get('window_ms', s.window_ms)
+            fixes["window_ms"] = defaults.window_ms
+        window = fixes.get("window_ms", s.window_ms)
         if not isinstance(s.hop_ms, int) or not HOP_MS_MIN <= s.hop_ms <= window:
-            fixes['hop_ms'] = min(defaults.hop_ms, window)
+            fixes["hop_ms"] = min(defaults.hop_ms, window)
         if not isinstance(s.vad_threshold, (int, float)) or not 0.0 <= s.vad_threshold <= 1.0:
-            fixes['vad_threshold'] = defaults.vad_threshold
-        if s.device not in ('cpu', 'cuda'):
-            fixes['device'] = defaults.device
+            fixes["vad_threshold"] = defaults.vad_threshold
+        if s.device not in ("cpu", "cuda"):
+            fixes["device"] = defaults.device
         if fixes:
             _log.warning(f"[{camera_id}] invalid audio settings replaced by defaults: "
                          f"{ {k: getattr(s, k) for k in fixes} }")
@@ -140,7 +139,7 @@ class AudioPipeline:
         try:
             rec = VoiceEmotionRecognizer(s.model, s.device, self.num_threads, self.sample_rate)
         except Exception as e:
-            if not self._recognizers:     # даже модель по умолчанию не загрузилась
+            if not self._recognizers:
                 raise
             self._failed[key] = str(e)
             _log.error(f"Cannot load voice model {key}: {e}; using default {self.defaults.model}")
@@ -171,39 +170,47 @@ class AudioPipeline:
             sess.settings = settings
         return sess
 
-    # --- обработка ---
-
     def handle_chunk(self, payload: Dict[str, Any], now: Optional[float] = None) -> List[AudioAnalytics]:
-        """Один аудиочанк продюсера → результаты для окон, которые он завершил."""
+        """
+        Обработка аудиочанка продюсера.
+
+        Args:
+            payload (Dict[str, Any]): Сообщение AudioMessage.
+            now     (float, optional): Текущее время для проверки устаревания. Defaults to None.
+
+        Returns:
+            List[AudioAnalytics]: Результаты окон, завершённых этим чанком.
+        """
         now = time.time() if now is None else now
         if self.staleness.is_stale(payload, now):
             return []
-        camera_id = payload['camera_id']
-        sess = self._session(camera_id)
+        camera_id      = payload["camera_id"]
+        sess           = self._session(camera_id)
         sess.last_seen = now
 
         windows = sess.buffer.push(
-            payload['audio_data'], int(payload['pts_ms']), float(payload['capture_wall_ts']),
-            seq=payload.get('seq'), channels=int(payload.get('channels', 1)),
-            sample_rate=int(payload.get('sample_rate', self.sample_rate)),
+            payload["audio_data"], int(payload["pts_ms"]), float(payload["capture_wall_ts"]),
+            seq=payload.get("seq"), channels=int(payload.get("channels", 1)),
+            sample_rate=int(payload.get("sample_rate", self.sample_rate)),
         )
         if not windows:
             return []
 
-        speech = [self.vad.speech_prob(w.samples) for w in windows]
+        speech   = [self.vad.speech_prob(w.samples) for w in windows]
         to_model = [i for i, p in enumerate(speech) if p >= sess.settings.vad_threshold]
-        probs: Dict[int, np.ndarray] = {}
+        outputs: Dict[int, Optional[Dict[str, Any]]] = {}
         recognizer = self._recognizer(sess.settings)
         if to_model:
-            t0 = time.perf_counter()
+            t0  = time.perf_counter()
             out = recognizer.predict([windows[i].samples for i in to_model])
             self._infer_s += time.perf_counter() - t0
-            probs = dict(zip(to_model, out))
+            outputs = dict(zip(to_model, out))
         self._audio_s += len(windows) * sess.settings.hop_ms / 1000.0
 
         results = []
         for i, w in enumerate(windows):
-            p = probs.get(i)
+            o = outputs.get(i)
+            p = o["probs"] if o is not None else None
             if p is not None:
                 sess.smoother.update(p)
                 sess.speech_windows += 1
@@ -219,10 +226,12 @@ class AudioPipeline:
                 is_speech=p is not None,
                 scores=[round(float(v), 5) for v in p] if p is not None else None,
                 label=label_of(int(np.argmax(p))) if p is not None else None,
+                logits=_rounded(o["logits"]) if o is not None else None,
+                emb=_rounded(o["emb"]) if o is not None and o.get("emb") is not None else None,
                 smoothed_scores=([round(float(v), 5) for v in sess.smoother.probs]
                                  if sess.smoother.probs is not None else None),
                 smoothed_label=sess.smoother.label,
-                model=getattr(recognizer, 'name', sess.settings.model),
+                model=getattr(recognizer, "name", sess.settings.model),
             )
             self.latency.add(processed - w.capture_wall_ts)
             sess.window_seq += 1
@@ -232,9 +241,9 @@ class AudioPipeline:
         return results
 
     def handle_event(self, event: Dict[str, Any]) -> None:
-        """stream_end — освободить сессию сразу (неполное последнее окно отбрасывается)."""
-        camera_id = event.get('camera_id')
-        if event.get('event') == 'stream_end' and camera_id in self._sessions:
+        """stream_end освобождает сессию сразу; неполное последнее окно отбрасывается."""
+        camera_id = event.get("camera_id")
+        if event.get("event") == "stream_end" and camera_id in self._sessions:
             sess = self._sessions.pop(camera_id)
             self.sessions_ended += 1
             _log.info(f"[{camera_id}] audio session ended (reason={event.get('reason')}): "
@@ -242,8 +251,7 @@ class AudioPipeline:
                       f"{sess.buffer.resets} discontinuities")
 
     def sweep_idle(self, now: Optional[float] = None) -> List[str]:
-        """Освободить сессии без чанков дольше session_idle_timeout_s."""
-        now = time.time() if now is None else now
+        now  = time.time() if now is None else now
         idle = [c for c, s in self._sessions.items() if now - s.last_seen > self.session_idle_timeout_s]
         for c in idle:
             self._sessions.pop(c, None)
@@ -251,17 +259,15 @@ class AudioPipeline:
         return idle
 
     def real_time_factor(self) -> float:
-        """Время инференса / длительность обработанного звука (меньше 1 — успеваем)."""
+        """Время инференса к длительности обработанного звука: меньше 1 — успеваем."""
         return self._infer_s / self._audio_s if self._audio_s > 0 else 0.0
-
-    # --- цикл сервиса ---
 
     def process(self, log_every_windows: int = 50) -> None:
         if self._kafka is None:
             raise RuntimeError("AudioPipeline created without Kafka settings")
         _log.info("Audio pipeline started")
-        last_sweep = time.time()
-        last_logged = 0
+        last_sweep     = time.time()
+        last_logged    = 0
         dropped_logged = 0
         try:
             while True:
@@ -285,9 +291,9 @@ class AudioPipeline:
 
                 if self.windows_total - last_logged >= log_every_windows:
                     last_logged = self.windows_total
-                    lat = self.latency.summary_ms()
+                    lat         = self.latency.summary_ms()
                     self.latency.reset()
-                    dropped = self.staleness.dropped - dropped_logged
+                    dropped        = self.staleness.dropped - dropped_logged
                     dropped_logged = self.staleness.dropped
                     _log.info(
                         f"Audio: {self.windows_total} windows, sessions={len(self._sessions)}, "

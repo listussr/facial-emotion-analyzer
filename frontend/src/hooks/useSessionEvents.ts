@@ -6,14 +6,44 @@ export interface AnalyticsFace {
   bbox: [number, number, number, number]; // x1, y1, x2, y2 в пикселях кадра
   track_id: number;
   face_id: string;
+  /** Итоговая эмоция: после слияния с голосом (fused-analytics) или только лицо;
+   *  null — «не определено» (неуверенная оценка) или оценки ещё нет */
   emotion: Emotion | null;
   emotion_scores: number[];
+  // --- поля слияния (fused-analytics); в vision-analytics их нет ---
+  face_emotion?: Emotion | null;
+  face_scores?: number[];
+  voice_attributed?: boolean;
+  voice_emotion?: Emotion | null;
+  voice_age_ms?: number | null;
+  /** Что реально слито, например 'stack_hidden -> video_only (нет аудио)' */
+  fusion_used?: string | null;
+  /** Номер слияния трека — меняется раз в окно */
+  fusion_seq?: number;
+}
+
+/** Голос сцены: последняя голосовая оценка на момент кадра. */
+export interface SceneVoice {
+  label: Emotion | null;
+  scores: number[];
+  age_ms: number;
+  speech_prob: number;
+  speaking: boolean;
+  window_seq: number;
 }
 
 export interface AnalyticsPayload {
   camera_id: string;
   frame_id: string | number;
+  pts_ms?: number | null;
+  capture_wall_ts?: number | null;
   faces: AnalyticsFace[];
+  scene_voice?: SceneVoice | null;
+  fusion?: {
+    mode: 'single_face' | 'multi_face' | 'no_face';
+    method?: string;
+    audio_windows_seen: number;
+  };
 }
 
 interface State {

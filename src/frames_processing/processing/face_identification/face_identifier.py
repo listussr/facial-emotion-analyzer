@@ -1,9 +1,12 @@
+"""Идентификация лиц по эмбеддингам в БД с кэшем и фоновыми запросами."""
+
+import hashlib
+import logging
+import threading
 import time
 import uuid
-import threading
-import logging
 import numpy as np
-import hashlib
+
 from concurrent.futures import ThreadPoolExecutor
 
 from ._face_encoder import FaceEncoder
@@ -11,30 +14,18 @@ from ....db_managing import FacesDBHandler
 
 _PENDING_PREFIX = "pending-"
 
+
 class FaceIdentifier(object):
-    def __init__(self, host: str = 'localhost', port: int = 5433, database: str = "emotions", 
-                 user: str = "app_user", password: str = "basic_app_password", threshold: float = 0.6, 
+    """
+    Идентификация лица сравнением его эмбеддинга с эмбеддингами в БД.
+
+    identify() сразу возвращает pending-id, настоящий UUID приходит из фонового запроса к БД.
+    Все запросы — в одном потоке: psycopg2-соединение не делится между потоками.
+    """
+
+    def __init__(self, host: str = "localhost", port: int = 5433, database: str = "emotions",
+                 user: str = "app_user", password: str = "basic_app_password", threshold: float = 0.6,
                  cache_ttl: int = 30, cleanup_interaval: int = 10):
-        """
-        #### Идентифицирует лицо путём сравления эмбеддингов лица и эмбеддингов в базе данных.
-        
-        :param host: Хост для подключения к базе данных.
-        :type host: str
-        :param port: Порт для подкючения к базе данных.
-        :type port: int
-        :param database: Название базы данных.
-        :type database: str
-        :param user: Имя пользователя в базе данных.
-        :type user: str
-        :param password: Пароль от базы данных.
-        :type password: str
-        :param threshold: Порог идентификации лица.
-        :type threshold: float
-        :param cache_ttl: Время жизни кэша с лицами (в секундах).
-        :type cache_ttl: int
-        :param cleanup_interaval: Интервал очистки кэша (в количестве вызовов метода `identify`).
-        :type cleanup_interaval: int
-        """
         self._db_handler = FacesDBHandler(
             host=host,
             port=port,
@@ -49,26 +40,16 @@ class FaceIdentifier(object):
 
         self._threshold = threshold
 
-        self._cache_ttl = cache_ttl
-        self._cache = {}
+        self._cache_ttl  = cache_ttl
+        self._cache      = {}
         self._cache_lock = threading.Lock()
 
         self._cleanup_interaval = cleanup_interaval
-        self._identify_calls = 0
+        self._identify_calls    = 0
 
         logging.info("Successfully initialized FaceIdentifier")
 
     def _cache_get(self, key: bytes) -> str | None:
-        """
-        Получение идентификатора из кэша первого уровня.
-        ---
-
-        Args:
-            key (bytes): Эмбеддингни лица.
-
-        Returns:
-            str | None: Идентификатор лица при наличии в кэше.
-        """
         with self._cache_lock:
             entry = self._cache.get(key)
             if entry and entry[1] > time.time():
@@ -76,32 +57,16 @@ class FaceIdentifier(object):
             return None
 
     def _cache_set(self, key: bytes, face_id: str) -> None:
-        """
-        Добавление идентификатора в кэш.
-        ---
-
-        Args:
-            key (bytes): Эмбеддинги лица.
-            face_id (str): Идентификатор лица.
-        """
         with self._cache_lock:
             self._cache[key] = (face_id, time.time() + self._cache_ttl)
 
     def _cache_update_pending(self, key: bytes, pending_id: str, real_id: str):
-        """
-        Заменяет pending-ID на реальный.
-        ---
-        """
         with self._cache_lock:
             entry = self._cache.get(key)
             if entry and entry[0] == pending_id:
                 self._cache[key] = (real_id, time.time() + self._cache_ttl)
 
     def _cleanup(self):
-        """
-        Очистка кэша с истёкшим сроком жизни.
-        ---
-        """
         now = time.time()
         with self._cache_lock:
             expired = [k for k, (_, exp) in self._cache.items() if exp <= now]
@@ -109,16 +74,6 @@ class FaceIdentifier(object):
                 del self._cache[k]
 
     def _create_cache_key(self, embedding: np.ndarray) -> bytes:
-        """
-        Создание ключа для кэша из эмбеддингов.
-        ---
-
-        Args:
-            embedding (np.ndarray): Эмбеддинги лица.
-
-        Returns:
-            bytes: Ключ для кэша идентификаторов.
-        """
         return hashlib.blake2b(
             np.round(embedding, 2).tobytes(),
             digest_size=16,
@@ -126,18 +81,14 @@ class FaceIdentifier(object):
 
     def _resolve_in_background(self, cache_key: bytes, pending_id: str, embedding: np.ndarray, face: np.ndarray, on_resolved=None) -> None:
         """
-        Фоновые обращения к базе данных для асинхронной работы сервиса.
-        ---
+        Поиск лица в БД или добавление нового, замена pending-id в кэше.
 
         Args:
-            cache_key (bytes): Ключ щаписи в кэше.
-            pending_id (str): Временный идентификатор.
-            embedding (np.ndarray): Эмбеддинги лица.
-            face (np.ndarray): Изображение лица.
-            on_resolved (Callable[[str], None], optional): Колбэк с настоящим
-                user_id из БД. Нужен, чтобы внешний код (пайплайн) узнал
-                реальный UUID — внутренний кэш FaceIdentifier'а сам по себе
-                до пайплайна не доходит.
+            cache_key   (bytes)             : Ключ записи в кэше.
+            pending_id  (str)               : Временный идентификатор.
+            embedding   (np.ndarray)        : Эмбеддинг лица.
+            face        (np.ndarray)        : Изображение лица.
+            on_resolved (Callable, optional): Колбэк с настоящим UUID для пайплайна. Defaults to None.
         """
         try:
             face_id = self._db_handler.fetch(embedding=embedding, threshold=self._threshold)
@@ -157,10 +108,7 @@ class FaceIdentifier(object):
             logging.error(f"FaceIdentifier: background DB lookup failed: {e}", exc_info=True)
 
     def resolve(self, face_id: str, face: np.ndarray, appearance: np.ndarray = None) -> str:
-        """
-        Проверка на временный face_id.
-        ---
-        """
+        """Настоящий идентификатор вместо pending-id, если он уже есть в кэше."""
         if not face_id.startswith(_PENDING_PREFIX):
             return face_id
 
@@ -179,20 +127,15 @@ class FaceIdentifier(object):
 
     def identify(self, face: np.ndarray, appearence: np.ndarray = None, on_resolved=None) -> str:
         """
-        #### Идентификация по базе данных.
+        Идентификация лица; неизвестное лицо добавляется в БД.
 
-        В случае отсутствия похожего лица в базе - добавление в базу и возврат нового ID.
+        Args:
+            face        (np.ndarray)          : Изображение лица.
+            appearence  (np.ndarray, optional): Готовый эмбеддинг, например от DeepSort. Defaults to None.
+            on_resolved (Callable, optional)  : Колбэк с настоящим UUID. Defaults to None.
 
-        :param face: Изображение с идентифицируемым лицом.
-        :type face: np.ndarray
-        :param appearence: Эмбеддинги от DeepSort или иного энкодера (опционально).
-        :type appearence: np.ndarray
-        :param on_resolved: Опциональный колбэк, который будет вызван с настоящим
-            user_id, когда фоновый запрос к БД отработает. Возвращаемое значение
-            функции — pending-id, который можно показывать сразу.
-        :type on_resolved: Callable[[str], None]
-        :return: ID пользователя из базы данных (pending-... до резолва).
-        :rtype: str
+        Returns:
+            str: UUID из кэша или pending-id до ответа БД.
         """
         self._identify_calls += 1
 
@@ -233,17 +176,11 @@ class FaceIdentifier(object):
 
     def submit_emotion_timeseries(self, face_id: str, payload: dict) -> None:
         """
-        Запланировать запись таймсерии эмоций в БД. Выполняется в том же
-        однопоточном executor, что и идентификация — psycopg2-соединение
-        не делится между потоками.
+        Запись таймсерии эмоций в фоне; при pending-id пропускается — нужен UUID для внешнего ключа.
 
-        Если face_id ещё не разрешён (pending-...), запись пропускается:
-        пользователь UUID нужен как FK на face_embeddings.
-
-        :param face_id: Идентификатор лица (UUID или pending-).
-        :type face_id: str
-        :param payload: Тело JSONB-записи (см. FacesDBHandler.insert_emotion_timeseries).
-        :type payload: dict
+        Args:
+            face_id (str) : UUID или pending-id.
+            payload (dict): Таймсерия трека.
         """
         if not face_id or face_id.startswith(_PENDING_PREFIX):
             logging.debug(f"Skip emotion timeseries flush: face_id={face_id} not resolved")
@@ -259,15 +196,9 @@ class FaceIdentifier(object):
             logging.exception(f"Failed to write emotion timeseries for {face_id}")
 
     def close(self):
-        """
-        #### Метод для безопасного отключения от базы данных.
-        """
         self._db_executor.shutdown(wait=True)
         self._db_handler.close()
         self._cache.clear()
 
     def __del__(self):
-        """
-        #### Деструктор для безопасного отключения от базы данных.
-        """
         self.close()

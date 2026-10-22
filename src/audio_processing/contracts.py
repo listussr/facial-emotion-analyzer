@@ -1,39 +1,46 @@
-"""
-Результат анализа одного аудиоокна (топик audio-analytics, JSON, ключ — camera_id).
+"""Результат анализа аудиоокна в топике audio-analytics."""
 
-Окна идут с шагом hop_ms и перекрываются. Окно без речи тоже публикуется
-(`is_speech=False`, `scores=None`): слиянию нужно знать, что голоса нет,
-а не гадать, потерялось ли сообщение.
-"""
 import json
-from dataclasses import asdict, dataclass
-from typing import Any, Dict, List, Optional
 
-from src.emotion_labels import EMOTION_LABELS, LABEL_SET
+from dataclasses import asdict
+from dataclasses import dataclass
+from typing import Any
+from typing import Dict
+from typing import List
+from typing import Optional
 
-RESULT_SCHEMA_VERSION = 1
+from src.emotion_labels import EMOTION_LABELS
+from src.emotion_labels import LABEL_SET
+
+RESULT_SCHEMA_VERSION = 2
 
 
 @dataclass(kw_only=True)
 class AudioAnalytics:
+    """
+    Результат одного аудиоокна.
+
+    Окно без речи тоже публикуется с scores=None: слиянию нужно знать, что голоса нет.
+    logits и emb — вход алгоритмов слияния; smoothed_* держатся между фразами, label None — «не определено».
+    """
     schema_version:    int = RESULT_SCHEMA_VERSION
     camera_id:         str
-    window_seq:        int                     # номер окна в сессии (с 0)
-    pts_start_ms:      int                     # начало окна во времени потока
-    pts_end_ms:        int                     # конец окна (не включительно)
-    capture_wall_ts:   float                   # время захвата конца окна
+    window_seq:        int
+    pts_start_ms:      int
+    pts_end_ms:        int
+    capture_wall_ts:   float
     processed_wall_ts: float
-    speech_prob:       float                   # доля речи в окне по VAD, 0..1
+    speech_prob:       float
     is_speech:         bool
-    # Сырые вероятности модели для этого окна; None — речи нет, модель не запускалась
     scores:            Optional[List[float]] = None
     label:             Optional[str] = None
-    # Сглаженные по окнам сессии; держатся между фразами
+    logits:            Optional[List[float]] = None
+    emb:               Optional[List[float]] = None
     smoothed_scores:   Optional[List[float]] = None
     smoothed_label:    Optional[str] = None
-    model:             str = ''
+    model:             str = ""
     label_set:         str = LABEL_SET
-    emotion_labels:    List[str] = None        # type: ignore[assignment]
+    emotion_labels:    List[str] = None  # type: ignore[assignment]
 
     def __post_init__(self) -> None:
         if self.emotion_labels is None:
@@ -43,9 +50,9 @@ class AudioAnalytics:
         return asdict(self)
 
     def to_json(self) -> bytes:
-        return json.dumps(self.to_dict(), ensure_ascii=False).encode('utf-8')
+        return json.dumps(self.to_dict(), ensure_ascii=False).encode("utf-8")
 
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> 'AudioAnalytics':
+    def from_dict(cls, data: Dict[str, Any]) -> "AudioAnalytics":
         known = set(cls.__dataclass_fields__)
         return cls(**{k: v for k, v in data.items() if k in known})

@@ -1,11 +1,13 @@
+"""FastAPI-приложение: сессии, загрузки, видео и события аналитики, история."""
+
 import logging
+
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from src.logging_config import setup_logger
-
 from .config import settings
 from .routes import sessions as sessions_routes
 from .routes import streams as streams_routes
@@ -14,6 +16,7 @@ from .routes import events as events_routes
 from .routes import history as history_routes
 from .schemas import HealthInfo
 from .services.session_manager import session_manager
+from .services.stream_dispatcher import live_dispatcher
 from .services.stream_dispatcher import stream_dispatcher
 from .services.events_dispatcher import events_dispatcher
 from .services import db as db_service
@@ -27,6 +30,7 @@ async def lifespan(_: FastAPI):
     log.info("Starting web server services")
     db_service.init_pool()
     await stream_dispatcher.start()
+    await live_dispatcher.start()
     await events_dispatcher.start()
     try:
         yield
@@ -34,6 +38,7 @@ async def lifespan(_: FastAPI):
         log.info("Shutting down web server services")
         session_manager.stop_all()
         await stream_dispatcher.stop()
+        await live_dispatcher.stop()
         await events_dispatcher.stop()
         db_service.close_pool()
 
@@ -56,6 +61,7 @@ app.add_middleware(
 app.include_router(sessions_routes.router)
 app.include_router(uploads_routes.router)
 app.include_router(streams_routes.router)
+app.include_router(streams_routes.live_router)
 app.include_router(events_routes.router)
 app.include_router(history_routes.router)
 
@@ -64,7 +70,7 @@ app.include_router(history_routes.router)
 def health():
     return HealthInfo(
         status="ok",
-        kafka=True,  # TODO: ping реального Kafka
+        kafka=True,
         sessions=len(session_manager.list()),
         uploads_dir=str(settings.UPLOADS_DIR),
     )

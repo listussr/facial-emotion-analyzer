@@ -1,14 +1,19 @@
+"""Локальная копия конфигов сессий: фоновое чтение compacted-топика session-config с начала."""
+
 import logging
 import threading
 import uuid
-from dataclasses import dataclass, replace
-from typing import Callable, Dict, Optional
+
+from dataclasses import dataclass
+from dataclasses import replace
+from typing import Callable
+from typing import Dict
+from typing import Optional
 
 from .contracts import SessionConfig
 from .topic import DEFAULT_TOPIC
 
 ChangeCallback = Callable[[str, Optional[SessionConfig], Optional[SessionConfig]], None]
-"""on_change(camera_id, old, new); new=None — конфиг удалён."""
 
 _log = logging.getLogger("session_config.store")
 
@@ -19,50 +24,51 @@ class StoreNotReadyError(RuntimeError):
 
 @dataclass
 class StoreStats:
-    """Счётчики для логов и отладки."""
-    configs:         int = 0   # сколько сессий сейчас в кэше
-    applied:         int = 0   # принятые записи
-    stale_ignored:   int = 0   # отброшены из-за старой ревизии
-    tombstones:      int = 0   # обработанные удаления
-    decode_errors:   int = 0   # битые сообщения
-    callback_errors: int = 0   # исключения в on_change
+    """Счётчики хранилища для логов и отладки."""
+    configs:         int = 0
+    applied:         int = 0
+    stale_ignored:   int = 0
+    tombstones:      int = 0
+    decode_errors:   int = 0
+    callback_errors: int = 0
 
 
 class SessionConfigStore:
+    """
+    Хранилище конфигов сессий.
+
+    Все партиции назначаются вручную с начала; готовность — дочитан конец, бывший на момент старта.
+    Колбэк on_change(camera_id, old, new) вызывается из фонового потока, new=None — конфиг удалён.
+    """
+
     def __init__(self, bootstrap_servers: str, topic: str = DEFAULT_TOPIC,
                  on_change: Optional[ChangeCallback] = None, poll_timeout: float = 0.5):
-        """
-        Создаёт читателя, но не запускает его.
-
-        Args:
-            bootstrap_servers: Брокеры Kafka.
-            topic: Топик конфигов.
-            on_change: Колбэк на изменение/удаление конфига (вызывается из фонового потока).
-            poll_timeout: Таймаут одного poll в фоновом потоке, с.
-        """
-        self._bootstrap = bootstrap_servers
-        self._topic = topic
-        self._on_change = on_change
+        self._bootstrap    = bootstrap_servers
+        self._topic        = topic
+        self._on_change    = on_change
         self._poll_timeout = poll_timeout
 
         self._configs: Dict[str, SessionConfig] = {}
-        self._lock = threading.Lock()
-        self._cond = threading.Condition(self._lock)
+        self._lock  = threading.Lock()
+        self._cond  = threading.Condition(self._lock)
         self._stats = StoreStats()
 
         self._ready = threading.Event()
-        self._stop = threading.Event()
+        self._stop  = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._consumer = None
-        self._targets: Dict[int, int] = {}   # partition → high watermark на момент старта
-        self._done: set = set()              # дочитанные партиции
-
-    # --- жизненный цикл ---
+        self._targets: Dict[int, int] = {}
+        self._done: set = set()
 
     def start(self, ready_timeout: float = 10.0) -> None:
         """
-        Запустить фоновый поток и дождаться готовности (дочитан текущий конец всех партиций).
-        Не успел за ready_timeout → StoreNotReadyError (поток при этом продолжает работу).
+        Запуск фонового потока с ожиданием готовности.
+
+        Args:
+            ready_timeout (float, optional): Время ожидания готовности, с. Defaults to 10.0.
+
+        Raises:
+            StoreNotReadyError: Не готово за ready_timeout; поток продолжает работу.
         """
         if self._thread is not None and self._thread.is_alive():
             return
@@ -76,25 +82,19 @@ class SessionConfigStore:
             )
 
     def stop(self, timeout: float = 5.0) -> None:
-        """Остановить поток и закрыть Kafka-консьюмер. Повторный вызов безопасен."""
         self._stop.set()
         thread, self._thread = self._thread, None
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout)
 
     def set_on_change(self, on_change: Optional[ChangeCallback]) -> None:
-        """
-        Назначить колбэк изменений после создания хранилища (когда получатель
-        создаётся позже хранилища). Действует для следующих сообщений.
-        """
         self._on_change = on_change
 
     @property
     def ready(self) -> bool:
-        """Дочитан ли топик до конца на момент старта."""
         return self._ready.is_set()
 
-    def __enter__(self) -> 'SessionConfigStore':
+    def __enter__(self) -> "SessionConfigStore":
         self.start()
         return self
 
@@ -102,50 +102,42 @@ class SessionConfigStore:
         self.stop()
         return False
 
-    # --- чтение (потокобезопасно) ---
-
     def get(self, camera_id: str) -> Optional[SessionConfig]:
-        """Текущий конфиг сессии или None."""
         with self._lock:
             return self._configs.get(camera_id)
 
     def wait_for(self, camera_id: str, timeout: float) -> Optional[SessionConfig]:
         """
-        Вернуть конфиг сессии, дождавшись его появления не дольше timeout.
-        Для гонки «первый кадр пришёл раньше конфига».
+        Конфиг сессии с ожиданием его появления: первый кадр может прийти раньше конфига.
+
+        Args:
+            camera_id (str)  : Идентификатор сессии.
+            timeout   (float): Максимальное ожидание, с.
+
+        Returns:
+            Optional[SessionConfig]: Конфиг или None.
         """
         with self._cond:
             self._cond.wait_for(lambda: camera_id in self._configs, timeout)
             return self._configs.get(camera_id)
 
     def snapshot(self) -> Dict[str, SessionConfig]:
-        """Копия всех текущих конфигов (для CLI list и отладки)."""
         with self._lock:
             return dict(self._configs)
 
     def stats(self) -> StoreStats:
-        """Копия счётчиков."""
         with self._lock:
             return replace(self._stats, configs=len(self._configs))
 
-    # --- внутреннее ---
-
     def _run(self) -> None:
-        """
-        Тело фонового потока: assign всех партиций с OFFSET_BEGINNING, цикл poll,
-        передача сообщений в _apply, отслеживание готовности. Временные ошибки
-        брокера логируются, поток не падает.
-        """
         from confluent_kafka import Consumer, KafkaError
 
         self._consumer = Consumer({
-            'bootstrap.servers': self._bootstrap,
-            # group.id обязателен для librdkafka, но группа не используется:
-            # партиции назначаются вручную, смещения не коммитятся.
-            'group.id': f'session-config-store-{uuid.uuid4()}',
-            'enable.auto.commit': False,
-            'enable.partition.eof': True,
-            'reconnect.backoff.max.ms': 1000,
+            "bootstrap.servers": self._bootstrap,
+            "group.id": f"session-config-store-{uuid.uuid4()}",
+            "enable.auto.commit": False,
+            "enable.partition.eof": True,
+            "reconnect.backoff.max.ms": 1000,
         })
         try:
             while not self._stop.is_set():
@@ -177,15 +169,15 @@ class SessionConfigStore:
 
     def _assign_all_partitions(self) -> Dict[int, int]:
         """
-        Узнать партиции топика, назначить их все с начала.
+        Назначение всех партиций топика с начала.
+
+        Запрашивается список всех топиков: запрос конкретного создал бы его без compaction.
 
         Returns:
-            {partition: high_watermark} на момент старта — цель для готовности.
+            Dict[int, int]: Партиция -> high watermark на момент старта.
         """
         from confluent_kafka import OFFSET_BEGINNING, TopicPartition
 
-        # Только список всех топиков: запрос метаданных конкретного топика при
-        # auto.create.topics.enable=true на брокере создаёт его — без compaction.
         metadata = self._consumer.list_topics(timeout=5.0).topics.get(self._topic)
         if metadata is None or metadata.error is not None or not metadata.partitions:
             raise RuntimeError(f"topic {self._topic!r} not found")
@@ -197,24 +189,25 @@ class SessionConfigStore:
             )
             targets[p] = high
             if high <= low:
-                self._done.add(p)   # пустая партиция — уже дочитана
+                self._done.add(p)
 
         self._consumer.assign([TopicPartition(self._topic, p, OFFSET_BEGINNING) for p in targets])
         return targets
 
     def _apply(self, key: Optional[bytes], value: Optional[bytes]) -> None:
         """
-        Применить одно сообщение:
-          - value None → tombstone: удалить, уведомить;
-          - иначе разобрать; если новее текущего — заменить, уведомить;
-          - устаревшее → stale_ignored; битое → decode_errors.
+        Применение одного сообщения: tombstone удаляет конфиг, более новая ревизия заменяет его.
+
+        Args:
+            key   (Optional[bytes]): camera_id.
+            value (Optional[bytes]): Конфиг в msgpack или None.
         """
         if not key:
             with self._lock:
                 self._stats.decode_errors += 1
             _log.warning("Session config message without key ignored")
             return
-        camera_id = key.decode('utf-8', errors='replace')
+        camera_id = key.decode("utf-8", errors="replace")
 
         if value is None:
             with self._lock:
@@ -242,11 +235,9 @@ class SessionConfigStore:
         self._notify(camera_id, old, new)
 
     def _update_readiness(self, partition: int, offset: int) -> None:
-        """Отметить прочитанную позицию; когда все партиции дочитаны до цели — выставить ready."""
         if self._ready.is_set():
             return
         target = self._targets.get(partition)
-        # Из-за уплотнения в смещениях бывают дыры, поэтому сравнение «>=»
         if target is not None and offset + 1 >= target:
             self._done.add(partition)
         self._check_ready()
@@ -259,10 +250,6 @@ class SessionConfigStore:
 
     def _notify(self, camera_id: str, old: Optional[SessionConfig],
                 new: Optional[SessionConfig]) -> None:
-        """
-        Разбудить ждущих в wait_for и вызвать on_change.
-        Колбэк вызывается вне блокировки; исключение в нём логируется и не роняет поток.
-        """
         with self._cond:
             self._cond.notify_all()
         if self._on_change is None:

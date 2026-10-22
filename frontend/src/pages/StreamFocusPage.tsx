@@ -2,11 +2,16 @@ import { useEffect, useState } from 'react';
 import { useParams, Link, useNavigate } from 'react-router-dom';
 import StreamTile, { formatTime } from '@/components/StreamTile';
 import EmotionBars from '@/components/EmotionBars';
-import { EMOTION_RU, StreamSource, Emotion, SessionHistoryDetail, TrackHistory } from '@/types';
+import {
+  EMOTION_RU, StreamSource, Emotion, SessionHistoryDetail, TrackHistory, HistoryModality, VoiceHistory,
+} from '@/types';
 import { api } from '@/api/client';
-import { useSessionEvents } from '@/hooks/useSessionEvents';
+import { useSessionEvents, SceneVoice } from '@/hooks/useSessionEvents';
 import { useLiveFaceStats, FaceStats } from '@/hooks/useLiveFaceStats';
-import { MODEL_LABEL } from '@/data/models';
+import { MODEL_LABEL, FUSION_LABEL, DEFAULT_FUSION_METHOD } from '@/data/models';
+import { MODALITY_LABEL } from '@/components/ProcessingOptions';
+
+const HISTORY_MODALITY_LABEL: Record<HistoryModality, string> = { face: 'Лицо', fused: 'Итог (лицо + голос)' };
 
 interface Props {
   kind: 'camera' | 'upload';
@@ -65,16 +70,25 @@ export default function StreamFocusPage({ kind }: Props) {
   // уже завершились (особенно важно после конца загруженного видео,
   // когда WS больше не присылает новых событий).
   const [dbHistory, setDbHistory] = useState<SessionHistoryDetail | null>(null);
+  const [voiceHistory, setVoiceHistory] = useState<VoiceHistory | null>(null);
+  const [histModality, setHistModality] = useState<HistoryModality>('face');
   useEffect(() => {
     if (!statsOn || !id) {
       setDbHistory(null);
+      setVoiceHistory(null);
       return;
     }
     let alive = true;
     const fetchDb = async () => {
       try {
-        const r = await api.sessionHistory(id);
-        if (alive) setDbHistory(r);
+        const [r, v] = await Promise.all([
+          api.sessionHistory(id, histModality),
+          api.sessionVoice(id).catch(() => null),
+        ]);
+        if (alive) {
+          setDbHistory(r);
+          setVoiceHistory(v);
+        }
       } catch {
         /* молча — раздел всё равно покажет live-данные */
       }
@@ -85,7 +99,7 @@ export default function StreamFocusPage({ kind }: Props) {
       alive = false;
       window.clearInterval(t);
     };
-  }, [id, statsOn]);
+  }, [id, statsOn, histModality]);
 
   if (error || !source) {
     return (
@@ -101,6 +115,10 @@ export default function StreamFocusPage({ kind }: Props) {
   }
 
   const liveFaces = events.latest?.faces ?? [];
+  const sceneVoice = events.latest?.scene_voice ?? null;
+  const active = source.modalities && source.modalities.length ? source.modalities : source.requestedModalities || [];
+  const hasAudio = active.includes('audio');
+  const hasVideo = active.includes('video');
 
   return (
     <>
@@ -125,8 +143,23 @@ export default function StreamFocusPage({ kind }: Props) {
           </div>
         </div>
         <div className="flex items-center gap-2">
-          <span className="chip chip-on">{TRACKER_LABEL[source.tracker]}</span>
-          <span className="chip">{MODEL_LABEL[source.model]}</span>
+          <span
+            className={`chip ${source.degraded ? 'chip-warn' : 'chip-on'}`}
+            title={source.degraded
+              ? `Запрошено: ${(source.requestedModalities || []).map((m) => MODALITY_LABEL[m]).join(' + ')}; источник дал только это`
+              : 'Модальности сессии'}
+          >
+            {active.map((m) => MODALITY_LABEL[m]).join(' + ') || '—'}
+            {source.degraded ? ' (не всё)' : ''}
+          </span>
+          {hasVideo && <span className="chip chip-on">{TRACKER_LABEL[source.tracker]}</span>}
+          {hasVideo && <span className="chip">{MODEL_LABEL[source.model] || source.model}</span>}
+          {hasVideo && source.clipFrames && <span className="chip">{source.clipFrames} кадров/окно</span>}
+          {hasVideo && hasAudio && (
+            <span className="chip" title="Метод слияния лица и голоса">
+              {FUSION_LABEL[source.fusionMethod || DEFAULT_FUSION_METHOD]}
+            </span>
+          )}
           <span className={`chip ${source.device === 'cuda' ? 'chip-on' : ''}`}>
             {source.device.toUpperCase()}
           </span>
@@ -154,7 +187,7 @@ export default function StreamFocusPage({ kind }: Props) {
 
       <div className="grid lg:grid-cols-3 gap-6">
         <section className="lg:col-span-2 glass p-4">
-          <StreamTile source={source} liveSrc={api.streamUrl(source.id)} />
+          <StreamTile source={source} live showStats />
 
           {source.kind === 'upload' && (
             <div className="mt-4 flex items-center gap-3">
@@ -186,7 +219,9 @@ export default function StreamFocusPage({ kind }: Props) {
           ) : (
             <ul className="space-y-3">
               {liveFaces.map((f) => {
-                const emo = (f.emotion as Emotion) || 'neutral';
+                const emo = f.emotion as Emotion | null;
+                // оценка была, но неуверенная (порог 0.4) — «не определено»
+                const undetermined = !emo && f.emotion_scores.length > 0;
                 return (
                   <li key={f.track_id} className="flex items-center gap-3">
                     <span
@@ -196,16 +231,37 @@ export default function StreamFocusPage({ kind }: Props) {
                     <div className="flex-1 min-w-0">
                       <div className="font-medium text-sm">{f.face_id}</div>
                       <div className="text-xs text-slate-500">
-                        {f.emotion ? EMOTION_RU[emo] : '—'} · трек #{f.track_id}
+                        {emo ? EMOTION_RU[emo] : undetermined ? 'не определено' : 'оценка копится…'} · трек #{f.track_id}
                         {f.emotion_scores.length > 0 && (
                           <> · уверенность {Math.max(...f.emotion_scores).toFixed(2)}</>
                         )}
                       </div>
+                      {f.face_emotion !== undefined && (
+                        <div className="text-[11px] text-slate-400">
+                          лицо: {f.face_emotion ? EMOTION_RU[f.face_emotion] : '—'}
+                          {f.voice_attributed && (
+                            <>
+                              {' '}· голос: {f.voice_emotion ? EMOTION_RU[f.voice_emotion] : '—'}
+                            </>
+                          )}
+                          {f.fusion_used && (
+                            <span title="Что реально слито в последнем окне"> · {describeFusion(f.fusion_used)}</span>
+                          )}
+                        </div>
+                      )}
                     </div>
                   </li>
                 );
               })}
             </ul>
+          )}
+
+          {hasAudio && (
+            <>
+              <hr className="my-5 border-indigo-100/60" />
+              <h3 className="font-bold mb-3">Голос</h3>
+              <VoicePanel voice={sceneVoice} connected={events.connected} />
+            </>
           )}
 
           <hr className="my-5 border-indigo-100/60" />
@@ -219,7 +275,10 @@ export default function StreamFocusPage({ kind }: Props) {
               label="FPS аналитики"
               value={events.fps > 0 ? events.fps.toFixed(1) : '—'}
             />
-            <Metric label="Лиц в кадре" value={String(liveFaces.length)} />
+            {hasVideo && <Metric label="Лиц в кадре" value={String(liveFaces.length)} />}
+            {hasAudio && (
+              <Metric label="Звука отправлено" value={`${(source.audioSeconds ?? 0).toFixed(1)} с`} />
+            )}
             {source.errors > 0 && (
               <Metric label="Ошибки" value={String(source.errors)} />
             )}
@@ -259,6 +318,20 @@ export default function StreamFocusPage({ kind }: Props) {
                   <span>в БД: {dbHistory.tracks_count} треков · {dbHistory.unique_users} лиц</span>
                 )}
               </div>
+              {(dbHistory?.available_modalities?.length ?? 0) > 1 && (
+                <div className="seg">
+                  {(['face', 'fused'] as HistoryModality[]).map((m) => (
+                    <button
+                      key={m}
+                      type="button"
+                      className={histModality === m ? 'active' : ''}
+                      onClick={() => setHistModality(m)}
+                    >
+                      {HISTORY_MODALITY_LABEL[m]}
+                    </button>
+                  ))}
+                </div>
+              )}
               {dbHistory && dbHistory.tracks_count > 0 && (
                 <a
                   href={api.sessionExportCsvUrl(source.id)}
@@ -304,6 +377,24 @@ export default function StreamFocusPage({ kind }: Props) {
                 <DbTrackCard key={`${t.camera_id}:${t.track_id}:${i}`} track={t} userId={(t as any).user_id} />
               ))}
             </div>
+          )}
+
+          {hasAudio && (
+            <>
+              <h4 className="font-semibold mt-6 mb-3">Голос сессии</h4>
+              {!voiceHistory || voiceHistory.total_windows === 0 ? (
+                <p className="text-sm text-slate-500">
+                  Голос сохраняется в БД по окончании сессии (окна с речью).
+                </p>
+              ) : (
+                <div className="md:w-1/2">
+                  <div className="text-[11px] text-slate-500 mb-2">
+                    окон с речью: {voiceHistory.total_windows}
+                  </div>
+                  <EmotionBars counts={voiceHistory.label_counts} total={voiceHistory.total_windows} />
+                </div>
+              )}
+            </>
           )}
         </section>
       )}
@@ -401,8 +492,43 @@ function statusLabel(s: StreamSource): string {
     case 'done':
       return 'готово';
     default:
-      return s.status;
+      return String((s as { status?: string }).status ?? '');
   }
+}
+
+/** 'stack_hidden -> video_only (нет аудио)' → понятная подпись */
+function describeFusion(used: string): string {
+  if (used.includes('video_only')) return used.startsWith('video_only') ? 'только лицо' : 'только лицо (нет голоса)';
+  if (used.includes('audio_only')) return used.startsWith('audio_only') ? 'только голос' : 'только голос (нет окна лица)';
+  return 'лицо + голос';
+}
+
+function VoicePanel({ voice, connected }: { voice: SceneVoice | null; connected: boolean }) {
+  if (!voice) {
+    return (
+      <p className="text-sm text-slate-500">
+        {connected ? 'Речи пока не было.' : 'Ожидаем данные аналитики…'}
+      </p>
+    );
+  }
+  const fresh = voice.age_ms < 3000;
+  return (
+    <div className="flex items-center gap-3">
+      <span
+        className="pulse-dot"
+        style={{ background: voice.speaking ? '#10b981' : '#94a3b8' }}
+        title={voice.speaking ? 'говорят' : 'тишина'}
+      />
+      <div className="flex-1 min-w-0">
+        <div className="font-medium text-sm">{voice.label ? EMOTION_RU[voice.label] : 'не определено'}</div>
+        <div className="text-xs text-slate-500">
+          {voice.speaking ? 'говорят' : 'тишина'} · оценке {(voice.age_ms / 1000).toFixed(1)} с
+          {!fresh && ' (устарела)'}
+          {voice.scores.length > 0 && <> · уверенность {Math.max(...voice.scores).toFixed(2)}</>}
+        </div>
+      </div>
+    </div>
+  );
 }
 
 function Metric({ label, value }: { label: string; value: string }) {

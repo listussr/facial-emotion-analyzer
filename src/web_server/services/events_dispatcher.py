@@ -1,11 +1,17 @@
+"""Раздача результатов аналитики из Kafka подписчикам WebSocket по camera_id."""
+
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
 import threading
+
 from collections import defaultdict
-from typing import Any, Dict, Optional, Set
+from typing import Any
+from typing import Dict
+from typing import Optional
+from typing import Set
 
 from confluent_kafka import Consumer
 

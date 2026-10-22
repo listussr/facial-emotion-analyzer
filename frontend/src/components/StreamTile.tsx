@@ -1,16 +1,18 @@
 import { CSSProperties } from 'react';
 import { StreamSource, EMOTION_RU } from '@/types';
+import LiveVideo from '@/components/live/LiveVideo';
 
 interface Props {
   source: StreamSource;
   /**
-   * Если задан, рендерим реальный MJPEG-стрим через <img>. Картинка уже
-   * содержит bbox-ы и подписи (их рисует visualizer.py), так что сверху
-   * декоративные оверлеи не нужны.
+   * Показывать реальное видео сессии: кадры и аналитика приходят по WebSocket,
+   * рамки и подписи рисует браузер (LiveVideo), с частотой кадров источника.
    */
-  liveSrc?: string;
-  /** Скрыть подписи на bbox в плейсхолдере (для маленьких тайлов 3×3) */
+  live?: boolean;
+  /** Скрыть подписи на рамках (для маленьких тайлов 3×3) */
   hideLabels?: boolean;
+  /** FPS показа и задержка в углу тайла */
+  showStats?: boolean;
 }
 
 const TRACKER_LABEL = { deepsort: 'DeepSORT', bytetrack: 'ByteTrack' } as const;
@@ -21,16 +23,17 @@ export function formatTime(sec: number): string {
   return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
 }
 
-export default function StreamTile({ source, liveSrc, hideLabels = false }: Props) {
-  const isLive = Boolean(liveSrc);
+export default function StreamTile({ source, live = false, hideLabels = false, showStats = false }: Props) {
+  const isLive = live;
 
   return (
     <div className="live-tile w-full">
-      {/* Реальный MJPEG. Если стрим ещё не подключён, остаётся фон-плейсхолдер. */}
+      {/* Реальное видео. Пока кадров нет, остаётся фон-плейсхолдер. */}
       {isLive && (
-        <img
-          src={liveSrc}
-          alt={source.name}
+        <LiveVideo
+          sessionId={source.id}
+          hideLabels={hideLabels}
+          showStats={showStats}
           className="absolute inset-0 w-full h-full object-cover"
         />
       )}

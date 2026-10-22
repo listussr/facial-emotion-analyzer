@@ -1,15 +1,23 @@
+"""Видео сессии: MJPEG размеченных кадров и WebSocket исходных кадров для отрисовки в браузере."""
+
 import asyncio
 import logging
+
 from typing import AsyncIterator
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter
+from fastapi import HTTPException
+from fastapi import Request
+from fastapi import WebSocket
+from fastapi import WebSocketDisconnect
 from fastapi.responses import StreamingResponse
 
 from ..services.session_manager import session_manager
+from ..services.stream_dispatcher import live_dispatcher
 from ..services.stream_dispatcher import stream_dispatcher
 
 router = APIRouter(prefix="/api/stream", tags=["stream"])
-log = logging.getLogger("stream")
+log    = logging.getLogger("stream")
 
 BOUNDARY = "frame"
 
@@ -51,3 +59,37 @@ async def stream(session_id: str, request: Request):
             "X-Accel-Buffering": "no",
         },
     )
+
+
+live_router = APIRouter(prefix="/api/live", tags=["stream"])
+
+
+@live_router.websocket("/{session_id}")
+async def live_ws(websocket: WebSocket, session_id: str):
+    """
+    Кадры сессии без разметки: [uint32 BE длина заголовка][JSON-заголовок с pts_ms][JPEG].
+
+    Рамки браузер берёт из /api/events и рисует сам, сопоставляя по pts_ms.
+    """
+    if session_manager.get(session_id) is None:
+        await websocket.close(code=1008, reason="Session not found")
+        return
+
+    await websocket.accept()
+    queue = live_dispatcher.subscribe(session_id)
+    try:
+        while True:
+            try:
+                frame = await asyncio.wait_for(queue.get(), timeout=15.0)
+            except asyncio.TimeoutError:
+                await websocket.send_json({"kind": "ping"})
+                continue
+            if frame is None:
+                break
+            await websocket.send_bytes(frame)
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        log.warning(f"live WS error for {session_id}: {e}")
+    finally:
+        live_dispatcher.unsubscribe(session_id, queue)

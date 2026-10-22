@@ -1,20 +1,26 @@
-from dataclasses import asdict, dataclass, fields
-from typing import Any, ClassVar, Dict, Literal, Optional, Tuple, Type, TypeVar
+"""Контракты сообщений продюсера: кадры, аудиочанки и события сессии (msgpack, schema v2)."""
 
 import msgpack
 
+from dataclasses import asdict
+from dataclasses import dataclass
+from dataclasses import fields
+from typing import Any
+from typing import ClassVar
+from typing import Dict
+from typing import Literal
+from typing import Optional
+from typing import Tuple
+from typing import Type
+from typing import TypeVar
+
 SCHEMA_VERSION = 2
 
-T = TypeVar('T', bound='_Contract')
+T = TypeVar("T", bound="_Contract")
 
 
 class _Contract:
-    """
-    Общая (де)сериализация контрактов.
-
-    Сообщение - плоский msgpack-словарь. При чтении неизвестные поля
-    игнорируются, чтобы новые поля не ломали старых консьюмеров.
-    """
+    """Плоский msgpack-словарь; при чтении неизвестные поля игнорируются ради совместимости."""
     _tuple_fields: ClassVar[Tuple[str, ...]] = ()
 
     def to_dict(self) -> Dict[str, Any]:
@@ -29,7 +35,7 @@ class _Contract:
 
     @classmethod
     def from_dict(cls: Type[T], data: Dict[str, Any]) -> T:
-        known = {f.name for f in fields(cls)}
+        known  = {f.name for f in fields(cls)}
         kwargs = {k: v for k, v in data.items() if k in known}
         for name in cls._tuple_fields:
             if kwargs.get(name) is not None:
@@ -43,27 +49,27 @@ class _Contract:
 
 @dataclass(kw_only=True)
 class MediaEnvelope(_Contract):
-    """Общие поля любого медиасообщения."""
-    _tuple_fields: ClassVar[Tuple[str, ...]] = ('modalities',)
+    """Общие поля медиасообщения: seq — счётчик потока, pts_ms — время от начала сессии."""
+    _tuple_fields: ClassVar[Tuple[str, ...]] = ("modalities",)
 
     schema_version:        int = SCHEMA_VERSION
     camera_id:             str
-    stream:                Literal['video', 'audio']
-    seq:                   int      # свой счётчик для каждого потока
-    pts_ms:                int      # время внутри медиапотока от начала сессии
+    stream:                Literal["video", "audio"]
+    seq:                   int
+    pts_ms:                int
     modalities:            Tuple[str, ...]
-    capture_wall_ts:       float    # время захвата
+    capture_wall_ts:       float
     session_start_wall_ts: float
 
 
 @dataclass(kw_only=True)
 class VideoMessage(MediaEnvelope):
-    """Кадр видеопотока (топик `video_topic`)."""
-    stream:           Literal['video'] = 'video'
-    frame_id:         str               # legacy-ключ склейки в аннотаторе
-    timestamp:        float             # legacy, равен capture_wall_ts
-    frame_data:       bytes             # JPEG
-    format:           str = 'jpeg'
+    """Кадр видеопотока в JPEG; frame_id и timestamp — легаси-поля аннотатора."""
+    stream:           Literal["video"] = "video"
+    frame_id:         str
+    timestamp:        float
+    frame_data:       bytes
+    format:           str = "jpeg"
     quality:          int
     frame_rate:       int
     processed_width:  int
@@ -74,14 +80,14 @@ class VideoMessage(MediaEnvelope):
 
 @dataclass(kw_only=True)
 class AudioMessage(MediaEnvelope):
-    """Аудиочанк (топик `audio_topic`)."""
-    stream:        Literal['audio'] = 'audio'
+    """Аудиочанк interleaved PCM; num_samples — на канал."""
+    stream:        Literal["audio"] = "audio"
     sample_rate:   int
     channels:      int
-    sample_format: str = 's16le'
-    num_samples:   int                  # на канал
-    audio_data:    bytes                # interleaved PCM
-    duration_ms:   int = 0              # вычисляется из num_samples / sample_rate
+    sample_format: str = "s16le"
+    num_samples:   int
+    audio_data:    bytes
+    duration_ms:   int = 0
 
     def __post_init__(self) -> None:
         self.duration_ms = self.num_samples * 1000 // self.sample_rate
@@ -90,30 +96,25 @@ class AudioMessage(MediaEnvelope):
 @dataclass(kw_only=True)
 class SessionEvent(_Contract):
     """
-    Событие жизненного цикла сессии (топик `events_topic`).
+    Событие жизненного цикла сессии.
 
-    - `stream_start` — один раз, перед первым медиасообщением: итоговые
-      модальности и параметры потоков.
-    - `stream_end` — один раз, после последнего медиасообщения: причина
-      завершения, последние `pts_ms` и сколько сообщений отправлено
-      (консьюмер может сверить с полученным).
+    stream_start — перед первым медиасообщением, stream_end — после последнего, с причиной и счётчиками.
     """
-    _tuple_fields: ClassVar[Tuple[str, ...]] = ('modalities', 'requested_modalities')
+    _tuple_fields: ClassVar[Tuple[str, ...]] = ("modalities", "requested_modalities")
 
     schema_version:        int = SCHEMA_VERSION
     camera_id:             str
-    event:                 Literal['stream_start', 'stream_end']
+    event:                 Literal["stream_start", "stream_end"]
     wall_ts:               float
     session_start_wall_ts: float
     requested_modalities:  Tuple[str, ...]
     modalities:            Tuple[str, ...]
     degraded:              bool = False
     is_live:               bool = False
-    topics:                Dict[str, str]                  # {'video': ..., 'audio': ...}
-    video:                 Optional[Dict[str, Any]] = None  # параметры видеопотока
-    audio:                 Optional[Dict[str, Any]] = None  # параметры аудиопотока
+    topics:                Dict[str, str]
+    video:                 Optional[Dict[str, Any]] = None
+    audio:                 Optional[Dict[str, Any]] = None
 
-    # только для stream_end
-    reason:      Optional[Literal['eof', 'stopped', 'error']] = None
+    reason:      Optional[Literal["eof", "stopped", "error"]] = None
     last_pts_ms: Optional[Dict[str, Optional[int]]] = None
     sent:        Optional[Dict[str, int]] = None

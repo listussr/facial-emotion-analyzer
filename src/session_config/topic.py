@@ -1,60 +1,60 @@
-"""
-Создание топика `session-config` с настройками уплотнения (compaction)
-и проверка настроек существующего топика.
-"""
-import logging
-from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+"""Создание топика session-config с уплотнением и проверка настроек существующего."""
 
-DEFAULT_TOPIC = 'session-config'
+import logging
+
+from dataclasses import dataclass
+from dataclasses import field
+from typing import Dict
+from typing import List
+from typing import Optional
+
+DEFAULT_TOPIC = "session-config"
 
 
 @dataclass(kw_only=True)
 class TopicSettings:
     """Параметры топика конфигов сессий."""
     name:                      str = DEFAULT_TOPIC
-    partitions:                int = 1           # как у медиатопиков
+    partitions:                int = 1
     replication_factor:        int = 1
-    segment_ms:                int = 3_600_000   # чаще закрывать сегменты — чаще уплотнение
-    delete_retention_ms:       int = 86_400_000  # сколько живёт tombstone
+    segment_ms:                int = 3_600_000
+    delete_retention_ms:       int = 86_400_000
     min_cleanable_dirty_ratio: float = 0.1
     extra_configs:             Dict[str, str] = field(default_factory=dict)
 
     def to_topic_configs(self) -> Dict[str, str]:
-        """Словарь конфигов топика для AdminClient (cleanup.policy=compact и т.д.)."""
         return {
-            'cleanup.policy': 'compact',
-            'segment.ms': str(self.segment_ms),
-            'delete.retention.ms': str(self.delete_retention_ms),
-            'min.cleanable.dirty.ratio': str(self.min_cleanable_dirty_ratio),
+            "cleanup.policy": "compact",
+            "segment.ms": str(self.segment_ms),
+            "delete.retention.ms": str(self.delete_retention_ms),
+            "min.cleanable.dirty.ratio": str(self.min_cleanable_dirty_ratio),
             **{k: str(v) for k, v in self.extra_configs.items()},
         }
 
 
 def _admin(bootstrap_servers: str):
     from confluent_kafka.admin import AdminClient
-    return AdminClient({'bootstrap.servers': bootstrap_servers})
+    return AdminClient({"bootstrap.servers": bootstrap_servers})
 
 
 def ensure_topic(bootstrap_servers: str, settings: Optional[TopicSettings] = None,
                  timeout: float = 10.0) -> bool:
     """
-    Создать топик, если его нет. Идемпотентна.
+    Создание топика, если его нет; у существующего только сверяются настройки.
 
     Args:
-        settings: Параметры топика; None — `TopicSettings()` по умолчанию.
+        bootstrap_servers (str)                    : Адрес Kafka.
+        settings          (TopicSettings, optional): Параметры топика. Defaults to None.
+        timeout           (float, optional)        : Таймаут операций, с. Defaults to 10.0.
 
     Returns:
-        True — топик создан, False — уже существовал.
-
-    Если топик существует, сверяет настройки (`check_topic`) и пишет
-    предупреждение о расхождениях, но ничего не меняет.
+        bool: True — топик создан, False — уже существовал.
     """
     from confluent_kafka import KafkaError, KafkaException
     from confluent_kafka.admin import NewTopic
 
     settings = settings or TopicSettings()
-    admin = _admin(bootstrap_servers)
+    admin    = _admin(bootstrap_servers)
 
     if settings.name not in admin.list_topics(timeout=timeout).topics:
         new_topic = NewTopic(
@@ -69,7 +69,6 @@ def ensure_topic(bootstrap_servers: str, settings: Optional[TopicSettings] = Non
             logging.info(f"Created topic {settings.name}")
             return True
         except KafkaException as e:
-            # Гонка: топик успел создать кто-то другой — это не ошибка
             if e.args[0].code() != KafkaError.TOPIC_ALREADY_EXISTS:
                 raise
 
@@ -82,19 +81,26 @@ def ensure_topic(bootstrap_servers: str, settings: Optional[TopicSettings] = Non
 def check_topic(bootstrap_servers: str, settings: Optional[TopicSettings] = None,
                 timeout: float = 10.0) -> List[str]:
     """
-    Сравнить фактические настройки топика с ожидаемыми.
+    Сравнение фактических настроек топика с ожидаемыми.
+
+    Запрашивается список всех топиков: запрос метаданных конкретного топика создал бы его при auto.create.
+
+    Args:
+        bootstrap_servers (str)                    : Адрес Kafka.
+        settings          (TopicSettings, optional): Ожидаемые параметры. Defaults to None.
+        timeout           (float, optional)        : Таймаут операций, с. Defaults to 10.0.
+
+    Raises:
+        RuntimeError: Топика нет.
 
     Returns:
-        Список расхождений вида "cleanup.policy: expected compact, got delete";
-        пустой — всё совпадает. Топика нет → RuntimeError.
+        List[str]: Расхождения; пустой список — всё совпадает.
     """
     from confluent_kafka.admin import ConfigResource
 
     settings = settings or TopicSettings()
-    admin = _admin(bootstrap_servers)
+    admin    = _admin(bootstrap_servers)
 
-    # Только список всех топиков: запрос метаданных конкретного топика при
-    # auto.create.topics.enable=true на брокере создаёт его (без compaction).
     metadata = admin.list_topics(timeout=timeout).topics.get(settings.name)
     if metadata is None or metadata.error is not None:
         raise RuntimeError(f"Topic {settings.name} does not exist")
@@ -103,11 +109,11 @@ def check_topic(bootstrap_servers: str, settings: Optional[TopicSettings] = None
     if len(metadata.partitions) != settings.partitions:
         diffs.append(f"partitions: expected {settings.partitions}, got {len(metadata.partitions)}")
 
-    resource = ConfigResource('topic', settings.name)
-    actual = admin.describe_configs([resource])[resource].result(timeout=timeout)
+    resource = ConfigResource("topic", settings.name)
+    actual   = admin.describe_configs([resource])[resource].result(timeout=timeout)
     for key, expected in settings.to_topic_configs().items():
         entry = actual.get(key)
-        got = entry.value if entry is not None else None
+        got   = entry.value if entry is not None else None
         if not _same(expected, got):
             diffs.append(f"{key}: expected {expected}, got {got}")
     return diffs

@@ -1,14 +1,17 @@
-from typing import TYPE_CHECKING, Optional, Union
+"""Выбор источника медиа по конфигу продюсера."""
+
+from typing import Optional
+from typing import TYPE_CHECKING
+from typing import Union
 
 from .base import MediaSource
-
 from .live_source import LiveSource
 from .file_source import FileSource
 
 if TYPE_CHECKING:
     from ..config import CameraConfig
 
-MIC_ONLY_SOURCE = 'mic'
+MIC_ONLY_SOURCE = "mic"
 
 
 def _as_camera_index(source: Union[str, int]) -> Optional[int]:
@@ -23,14 +26,16 @@ def open_source(config: "CameraConfig") -> MediaSource:
     """
     Выбор источника по конфигу.
 
-    - целое число / строка из цифр -> `LiveSource` (вебкамера и/или микрофон);
-    - 'mic' -> `LiveSource` только с микрофоном;
-    - иначе (путь к файлу, rtsp://, http:// …) -> `FileSource`.
+    Индекс камеры — LiveSource с вебкамерой, "mic" — LiveSource только с микрофоном,
+    остальное (файл, rtsp://, http://) — FileSource.
 
-    `av` (PyAV) загружается вместе с пакетом. `sounddevice` — лениво, внутри
-    `MicSource`: PortAudio нужен только для живого захвата микрофона.
+    Args:
+        config (CameraConfig): Конфиг продюсера.
+
+    Returns:
+        MediaSource: Неоткрытый источник.
     """
-    source = config.source
+    source       = config.source
     camera_index = _as_camera_index(source)
 
     if camera_index is not None or source == MIC_ONLY_SOURCE:
@@ -47,4 +52,5 @@ def open_source(config: "CameraConfig") -> MediaSource:
         sample_rate=config.audio_sample_rate,
         channels=config.audio_channels,
         samples_per_chunk=config.audio_samples_per_chunk,
+        max_size=(config.max_width, config.max_height),
     )

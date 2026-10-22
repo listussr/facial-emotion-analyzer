@@ -5,6 +5,7 @@ import {
   EMOTION_COLORS,
   EMOTION_RU,
   flattenSamples,
+  chartOrder,
 } from './_chart_utils';
 
 interface Props {
@@ -21,7 +22,8 @@ interface Props {
  * а равномерный многоугольник — нейтральное.
  */
 export default function EmotionRadar({ tracks, range = null, size = 320 }: Props) {
-  const samples = useMemo(() => flattenSamples(tracks, range), [tracks, range]);
+  const order = useMemo(() => chartOrder(tracks), [tracks]);
+  const samples = useMemo(() => flattenSamples(tracks, range, 600, order), [tracks, range, order]);
 
   if (samples.length === 0) {
     return <p className="text-sm text-slate-500">Нет данных для профиля.</p>;
@@ -29,7 +31,7 @@ export default function EmotionRadar({ tracks, range = null, size = 320 }: Props
 
   // Средние вероятности по каждой эмоции
   const N = samples.length;
-  const means = EMOTION_ORDER.map((_, i) => {
+  const means = order.map((_, i) => {
     let s = 0;
     for (const sm of samples) s += clamp01(sm.scores[i] ?? 0);
     return s / N;
@@ -41,7 +43,7 @@ export default function EmotionRadar({ tracks, range = null, size = 320 }: Props
   const R = size * 0.38;
 
   // Углы для 8 осей — начиная с верха (-π/2), по часовой
-  const angle = (i: number) => -Math.PI / 2 + (i * 2 * Math.PI) / EMOTION_ORDER.length;
+  const angle = (i: number) => -Math.PI / 2 + (i * 2 * Math.PI) / order.length;
   const point = (i: number, r: number) => {
     const a = angle(i);
     return [cx + r * Math.cos(a), cy + r * Math.sin(a)] as const;
@@ -65,7 +67,7 @@ export default function EmotionRadar({ tracks, range = null, size = 320 }: Props
     <div className="w-full flex flex-col items-center">
       <svg viewBox={`0 0 ${size} ${size}`} width={size} height={size}>
         {rings.map((k) => {
-          const pts = EMOTION_ORDER.map((_, i) => {
+          const pts = order.map((_, i) => {
             const [x, y] = point(i, R * k);
             return `${x.toFixed(1)},${y.toFixed(1)}`;
           }).join(' ');
@@ -80,7 +82,7 @@ export default function EmotionRadar({ tracks, range = null, size = 320 }: Props
           );
         })}
         {/* Оси */}
-        {EMOTION_ORDER.map((_, i) => {
+        {order.map((_, i) => {
           const [x, y] = point(i, R);
           return (
             <line
@@ -112,14 +114,14 @@ export default function EmotionRadar({ tracks, range = null, size = 320 }: Props
               cx={x}
               cy={y}
               r={3.5}
-              fill={EMOTION_COLORS[EMOTION_ORDER[i]]}
+              fill={EMOTION_COLORS[order[i]]}
               stroke="white"
               strokeWidth={1.5}
             />
           );
         })}
         {/* Подписи эмоций по периметру */}
-        {EMOTION_ORDER.map((emo, i) => {
+        {order.map((emo, i) => {
           const [x, y] = point(i, R + 18);
           return (
             <text
@@ -138,7 +140,7 @@ export default function EmotionRadar({ tracks, range = null, size = 320 }: Props
       </svg>
 
       <div className="grid grid-cols-2 gap-x-6 gap-y-1 text-xs mt-3 font-mono">
-        {EMOTION_ORDER.map((emo, i) => (
+        {order.map((emo, i) => (
           <div key={emo} className="flex items-center justify-between gap-3">
             <span className="flex items-center gap-1.5">
               <span
