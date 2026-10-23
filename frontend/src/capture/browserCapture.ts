@@ -102,7 +102,12 @@ class BrowserCapture {
       throw new Error('Захват уже идёт');
     }
     if (!navigator.mediaDevices?.getUserMedia) {
-      throw new Error('Браузер не даёт доступ к камере: нужна страница по HTTPS или localhost');
+      const https = `https://${window.location.hostname}:8443${window.location.pathname}`;
+      throw new Error(
+        window.isSecureContext
+          ? 'Браузер не даёт доступ к камере'
+          : `Камера доступна только по защищённому адресу — откройте ${https}`,
+      );
     }
     this.stopping = false;
     this.set({ ...INITIAL, status: 'starting', name: opts.name });

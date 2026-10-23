@@ -1,0 +1,15 @@
+config,delta_rss_mb,elapsed_s,fps,frames,mean_ms,model,num_threads,p50_ms,p95_ms,p99_ms,threaded,tracker
+deepsort_resnet18_t7,94.8,23.655,16.91,400,53.25,resnet-18,7,49.0,82.96,110.71,True,deepsort
+bytetrack_resnet18_t2,50.1,9.88,40.49,400,16.35,resnet-18,2,9.53,51.1,83.12,True,bytetrack
+bytetrack_resnet18_t7,49.6,8.387,47.7,400,12.61,resnet-18,7,9.06,30.02,51.0,True,bytetrack
+bytetrack_resnet18_int8,23.9,26.681,14.99,400,59.33,resnet-18-int8,7,8.02,274.8,344.34,True,bytetrack
+bytetrack_resnet50,47.3,10.446,38.29,400,15.85,resnet-50,7,8.52,49.95,65.26,True,bytetrack
+bytetrack_resnet50_int8,24.0,53.409,7.49,400,125.55,resnet-50-int8,7,8.02,630.96,738.97,True,bytetrack
+bytetrack_effnetb3,44.0,11.49,34.81,400,18.66,efficientnet-b3,7,8.27,63.44,128.58,True,bytetrack
+bytetrack_effnetb3_int8,23.9,56.196,7.12,400,133.25,efficientnet-b3-int8,7,7.76,694.45,847.92,True,bytetrack
+bytetrack_convnext,48.8,11.744,34.06,400,19.36,convnext,7,8.53,65.45,107.61,True,bytetrack
+bytetrack_convnext_int8,24.1,28.783,13.9,400,64.85,convnext-int8,7,7.98,308.81,421.88,True,bytetrack
+bytetrack_convnext_gelu,47.4,11.299,35.4,400,20.4,convnext-gelu,7,8.31,69.89,127.7,True,bytetrack
+bytetrack_swin,42.9,12.557,31.85,400,23.61,swin-tiny,7,8.05,89.1,130.16,True,bytetrack
+bytetrack_swin_int8,46.8,10.466,38.22,400,18.64,swin-tiny-int8,7,8.02,64.12,113.41,True,bytetrack
+bytetrack_resnet18_t7_seq,52.3,7.562,52.9,400,11.25,resnet-18,7,8.02,25.95,37.81,False,bytetrack

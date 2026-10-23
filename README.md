@@ -1,319 +1,304 @@
-# Affectra — система распознавания эмоций по лицу
+# Affectra — распознавание эмоций по лицу и голосу
 
-Локальная (или работающая в локальной сети) система реального времени, которая
-**обнаруживает**, **отслеживает**, **идентифицирует** и **читает эмоции** каждого
-лица из одного или нескольких видеоисточников. Результаты сохраняются как
-таймсерия в Postgres + pgvector и доступны через веб-интерфейс — с поиском
-конкретного человека по фото и подробными графиками вероятностей по эмоциям.
+Локальная система реального времени: находит лица в видео, следит за ними, узнаёт людей и определяет
+эмоции **по лицу, по голосу и по их объединению**. Источник — камера и микрофон браузера, видеофайл
+или IP-камера/поток. После каждой сессии сохраняется итоговое видео с разметкой и аналитика.
 
-> НИР, 4 курс, 1 семестр. Видео не покидает локальную сеть; внешние API не
-> используются.
+> НИР, 4 курс, 1 семестр. Всё работает локально: видео не покидает компьютер или локальную сеть,
+> внешние API не используются.
 
----
+**Что умеет**
 
-## 1. Общая архитектура
-
-Сервисы общаются через Kafka и не знают друг о друге — каждый можно
-перезапускать или масштабировать независимо.
-
-```mermaid
-flowchart LR
-    %% nodes
-    src([RTSP / webcam / upload])
-    producer["video_producing.CameraProducer\n(JPEG-encode, frame_rate cap)"]
-    raw[(Kafka<br/>raw-video-frames)]
-    pipeline["frames_processing.ProcessingPipeline\n(detect → track → identify → emotion)"]
-    analytics[(Kafka<br/>vision-analytics)]
-    annotator["video_annotating.VideoAnnotator\n(draws bboxes & labels)"]
-    annotated[(Kafka<br/>annotated-video)]
-    web["web_server (FastAPI)\nsessions · uploads · MJPEG · WS · history"]
-    pg[(Postgres + pgvector<br/>face_embeddings + emotion_timeseries)]
-    ui["frontend (React + Vite)\nкамеры · видео · история · настройки"]
-
-    src --> producer --> raw --> pipeline
-    pipeline --> analytics
-    pipeline -- "insert<br/>таймсерия<br/>эмоций" --> pg
-    raw --> annotator
-    analytics --> annotator
-    annotator --> annotated --> web
-    pipeline -. "(face_id ↔ embedding)" .-> pg
-    web --> pg
-    web -- "MJPEG · WebSocket · REST" --> ui
-    ui -- "POST /api/sessions/* → создать сессию" --> web
-    web -- "spawn CameraProducer" --> producer
-```
-
-Подробнее о слоях — в [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md);
-карта кода и документация по каждому Python-модулю —
-в [`docs/CODE_OVERVIEW.md`](docs/CODE_OVERVIEW.md) и
-[`docs/modules/`](docs/modules/README.md).
+- анализ живой камеры браузера, видеофайлов и RTSP/HTTP-потоков, несколько сессий одновременно;
+- 6 эмоций CREMA-D: злость, отвращение, страх, радость, нейтрально, грусть;
+- эмоции по лицу (Swin-T по окну кадров), по голосу (WavLM) и их слияние (8 методов);
+- просмотр в браузере в реальном времени: рамки и подписи рисуются поверх видео;
+- итоговая запись после сессии: mp4 с рамками и звуком + JSON-аналитика в S3-хранилище;
+- узнавание людей между сессиями и поиск человека по фото, история эмоций, выгрузка в CSV.
 
 ---
 
-## 2. Обработка одного кадра
+## 1. Быстрый старт (Docker)
 
-Пять стадий, каждую алгоритм можно заменить:
+Нужны Docker Desktop (Compose v2) и около 8 ГБ свободной памяти.
 
-```mermaid
-flowchart LR
-    A[Захват<br/>cv2.VideoCapture] --> B[Детекция<br/>MediaPipe<br/>+ geometry filter]
-    B --> C{Трекинг}
-    C -->|DeepSORT| D[Re-ID embedder<br/>+ Kalman]
-    C -->|ByteTrack| D2[Motion-only<br/>IoU + Kalman]
-    D --> E[Идентификация<br/>FaceNet → pgvector]
-    D2 --> E
-    E --> F[Эмоции<br/>ResNet / ConvNeXt / EffNet / Swin]
-    F --> G[Сглаживание<br/>EMA + hysteresis]
-    G --> H[Аннотация + сохранение<br/>vision-analytics, emotion_timeseries]
-```
+1. Распакуйте модели CREMA-D (`crema_emotion_models.zip`) так, чтобы в `models/crema/` лежали
+   `*.onnx`, `fusion_params.json` и `manifest.json`. Веса в git не хранятся.
+2. При желании скопируйте `.env.example` в `.env` и поменяйте значения — у всех есть разумные значения
+   по умолчанию.
+3. Запустите стек:
 
-Полные пути обработки и интерфейсы каждого шага — в
-[`docs/ARCHITECTURE.md#стадии-обработки`](docs/ARCHITECTURE.md).
+   ```bash
+   docker compose up -d --build
+   ```
 
----
+4. Откройте **http://localhost:8080**.
 
-## 3. Per-session routing
-
-Каждая сессия (камера или загруженное видео) может использовать **свой**
-трекер, **свою** модель эмоций и **своё** устройство. Конфигурация уезжает в
-Kafka-сообщении и поднимает ленивые per-session ресурсы в пайплайне.
-
-```mermaid
-flowchart LR
-    subgraph UI [Frontend]
-        ui1["Пользователь выбирает\n(tracker, model, device)"]
-    end
-
-    subgraph WS [web_server]
-        sm["SessionManager._spawn"]
-    end
-
-    subgraph PR [video_producing]
-        cp["CameraProducer\nframes + session_config<br/>в каждое msgpack-сообщение"]
-    end
-
-    subgraph PP [ProcessingPipeline]
-        rt["_get_session_tracker(camera_id)\nс ключом = session_config.tracker"]
-        rr["_get_recognizer(session_config)\nкэш по (model, device, threads)"]
-    end
-
-    ui1 -- POST /api/sessions --> sm
-    sm -- "CameraConfig(tracker_name, emotion_model, ...)" --> cp
-    cp -- "msgpack message" --> rt
-    cp -- "msgpack message" --> rr
-```
-
-Это позволяет, например, держать одновременно одну сессию на **ByteTrack +
-ResNet-18 INT8** для быстрого мониторинга и другую на **DeepSORT +
-ConvNeXt** для качественного анализа — без перезапуска пайплайна.
-
----
-
-## 4. Поток данных в БД
-
-```mermaid
-erDiagram
-    face_embeddings ||--o{ emotion_timeseries : "user_id"
-    face_embeddings {
-        uuid user_id PK
-        vector(512) embedding
-        bytea face_image
-        timestamp first_seen
-    }
-    emotion_timeseries {
-        serial id PK
-        uuid user_id FK
-        jsonb data "samples, camera_id, track_id, ..."
-        timestamp created_at
-    }
-```
-
-`data` — JSONB следующего вида:
-
-```json
-{
-  "camera_id": "upload_8922b7",
-  "track_id": 12,
-  "started_at": 1762538732.41,
-  "ended_at": 1762538745.18,
-  "samples": [
-    { "t": 1762538733.22, "label": "neutral", "scores": [0.04, 0.03, 0.02, 0.05, 0.81, 0.02, 0.02, 0.01] },
-    ...
-  ]
-}
-```
-
-Порядок `scores` — `anger, contempt, disgust, fear, happy, neutral, sad, surprise`.
-
----
-
-## 5. Запуск
-
-### 5.1. Инфраструктура (один раз)
-
-```powershell
-docker compose -f kafka_server\docker-compose.yml up -d
-docker compose -f faces_emotions_database\docker-compose.yaml up -d
-```
-
-### 5.2. Бэкенд-сервисы
-
-В отдельных окнах:
-
-```powershell
-python consumer.py        # ProcessingPipeline
-python visualizer.py      # VideoAnnotator
-python webapp.py          # FastAPI web server  → http://localhost:8000
-```
-
-### 5.3. Frontend
-
-```powershell
-cd frontend
-npm install
-npm run dev               # → http://localhost:5173
-```
-
-`vite.config.ts` проксирует `/api/*` и `ws://api/events/*` на `:8000`,
-так что фронтенд и Swagger делят одну API-поверхность.
-
-### 5.4. Опционально — INT8-варианты моделей
-
-```powershell
-python scripts/quantize_emotion_model.py
-```
-
-Создаст `*.int8.onnx` для каждой ONNX-модели в
-`src/frames_processing/processing/emotion_recognition/models/`.
-
----
-
-## 6. Результаты бенчмарка (Intel Core i5-1135G7, CPU-only, 400 кадров)
-
-| config | FPS | mean ms | p50 ms | p95 ms | p99 ms | ΔRSS, MB |
-|---|---:|---:|---:|---:|---:|---:|
-| `bytetrack_resnet18_t7_seq` | **52.9** | 11.3 | 8.0 | 26.0 | 37.8 | 52 |
-| `bytetrack_resnet18_t7` | 47.7 | 12.6 | 9.1 | 30.0 | 51.0 | 50 |
-| `bytetrack_resnet18_t2` | 40.5 | 16.4 | 9.5 | 51.1 | 83.1 | 50 |
-| `bytetrack_resnet50` | 38.3 | 15.9 | 8.5 | 50.0 | 65.3 | 47 |
-| `bytetrack_swin_int8` | 38.2 | 18.6 | 8.0 | 64.1 | 113.4 | 47 |
-| `bytetrack_convnext_gelu` | 35.4 | 20.4 | 8.3 | 69.9 | 127.7 | 47 |
-| `bytetrack_effnetb3` | 34.8 | 18.7 | 8.3 | 63.4 | 128.6 | 44 |
-| `bytetrack_convnext` | 34.1 | 19.4 | 8.5 | 65.5 | 107.6 | 49 |
-| `bytetrack_swin` | 31.9 | 23.6 | 8.1 | 89.1 | 130.2 | 43 |
-| `deepsort_resnet18_t7` | 16.9 | 53.3 | 49.0 | 83.0 | 110.7 | 95 |
-
-INT8-варианты на этом CPU без VNNI часто хуже FP32 — известная особенность
-динамической квантизации на x86 для свёрточных сетей; ResNet-INT8 и
-ConvNeXt-INT8 проседают в ~3 раза, что обсуждается в разделе «Оптимизация»
-тезисной работы.
-
-Запуск полного свипа:
-
-```powershell
-python scripts/benchmark.py --frames 400 --warmup 30
-```
-
-См. `scripts/bench_results/{results.csv, fps.png, latency.png}`.
-
----
-
-## 7. Технологии
-
-| Слой | Стек |
+| Адрес | Что там |
 |---|---|
-| Захват | OpenCV (`cv2.VideoCapture`), msgpack, confluent-kafka |
-| Детекция | MediaPipe Face Detection |
-| Трекинг | deep-sort-realtime · supervision (ByteTrack) |
-| Идентификация | facenet-pytorch (Inception-ResNetV1) + pgvector |
-| Эмоции | PyTorch / ONNX Runtime (XNNPACK), 8 классов |
-| Backend | FastAPI · uvicorn · psycopg2 · confluent-kafka |
-| Frontend | React 18 · TypeScript · Vite · Tailwind CSS |
-| Хранилище | Postgres 17 + pgvector |
+| http://localhost:8080 | веб-интерфейс |
+| http://localhost:8000/docs | REST API (Swagger) |
+| http://localhost:7000 | Kafka UI |
+| http://localhost:8333 | S3 API хранилища записей (SeaweedFS) |
+| localhost:5433 | PostgreSQL + pgvector |
 
----
+Модель детектора речи Silero VAD и веса FaceNet скачиваются при сборке образа. После запуска сервисы
+загружают модели (до пары минут при первом старте). Пока в шапке горит «модели загружаются…», анализ не
+запускается. В `docker ps` готовые сервисы отмечены `healthy`.
 
-## 8. Структура репозитория
+Kafka работает в режиме KRaft (без ZooKeeper). Чтобы поднять её из трёх узлов с репликацией топиков,
+добавьте второй файл compose:
 
-```
-src/
-  video_producing/                — производит кадры в Kafka
-  frames_processing/              — пайплайн обработки одного кадра
-    processing/
-      face_detection/             — MediaPipe + geometry-фильтры
-      faces_tracking/             — DeepSORT / ByteTrack под общим интерфейсом
-      face_identification/        — FaceNet + pgvector
-      emotion_recognition/        — модели + предобработка
-        models/                   — *.onnx / *.pth
-        _custom_models.py         — кастомные классы для CUDA-unpickle
-    processing_pipline.py         — Stage A/B/C + per-session routing
-  video_annotating/               — annotator: bboxes + лейблы на JPEG
-  db_managing/                    — psycopg2-обёртки
-  web_server/                     — FastAPI: sessions · streams · events · history
-frontend/                         — React UI
-scripts/
-  benchmark.py                    — свип конфигов, CSV + графики
-  quantize_emotion_model.py       — генерация INT8-вариантов
-  check_emotion_timeseries.py     — диагностика того, что лежит в БД
-
-consumer.py · visualizer.py · webapp.py   — entry points трёх Python-сервисов
-
-docs/
-  ARCHITECTURE.md                 — архитектура и проектные решения
-  CODE_OVERVIEW.md                — карта кода: модули, форматы, конфигурация
-  modules/                        — по документу на каждый Python-модуль
+```bash
+docker compose -f docker-compose.yml -f docker-compose.kafka-cluster.yml up -d --build
 ```
 
-### Документация по модулям
+В кластере у топиков 3 реплики и `min.insync.replicas=2`: при остановке любого брокера сессии
+продолжаются. Каждый брокер занимает около 350 МБ памяти. При переходе между режимами сначала выполните
+`docker compose down`.
 
-| Документ | О чём |
+Второй узел приёма добавляет `docker-compose.multi-ingest.yml`: узлы делят сессии, а камера браузера работает
+через любой из них (см. [docs/modules/ingest.md](docs/modules/ingest.md#несколько-узлов-приёма)).
+
+Чтобы разнести систему по нескольким машинам, используйте `deploy/docker-stack.yml` (Docker Swarm). Роли узлов,
+подготовка, NTP и запуск описаны в [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
+
+## 2. Как пользоваться
+
+| Раздел | Что делать |
 |---|---|
-| [entrypoints.md](docs/modules/entrypoints.md) | `consumer.py`, `visualizer.py`, `webapp.py`, `producer.py` |
-| [video_producing.md](docs/modules/video_producing.md) | Захват видео → JPEG → Kafka |
-| [frames_processing.md](docs/modules/frames_processing.md) | `ProcessingPipeline`, Stage A/B/C, кэш треков |
-| [face_detection.md](docs/modules/face_detection.md) | MediaPipe + фильтры ложных срабатываний |
-| [faces_tracking.md](docs/modules/faces_tracking.md) | DeepSORT и ByteTrack за общим интерфейсом |
-| [face_identification.md](docs/modules/face_identification.md) | FaceNet + pgvector, асинхронный резолв `face_id` |
-| [emotion_recognition.md](docs/modules/emotion_recognition.md) | Модели эмоций, INT8, сглаживание |
-| [video_annotating.md](docs/modules/video_annotating.md) | Синхронизация кадров с аналитикой, отрисовка |
-| [db_managing.md](docs/modules/db_managing.md) | Таблицы, запросы, что и когда пишется |
-| [web_server.md](docs/modules/web_server.md) | FastAPI: роуты, сервисы, диспетчеры |
-| [data_models.md](docs/modules/data_models.md) | Dataclass-описания сообщений |
-| [logging_config.md](docs/modules/logging_config.md) | Единая настройка логирования |
-| [scripts.md](docs/modules/scripts.md) | Бенчмарк, квантизация, диагностика БД |
+| **Анализ** | Выбрать источник (камера браузера, файл или ссылка на поток), отметить, что анализировать (лицо и голос, только лицо, только голос), нажать «Начать анализ». Откроется страница сессии: видео с рамками, кто в кадре и какая у него эмоция, что слышно в голосе. |
+| **Записи** | Итоговые видео завершённых сессий: просмотр с перемоткой, распределение эмоций, скачивание mp4 и JSON. |
+| **Люди** | Поиск человека по фото и его история эмоций за все сессии. |
+| **Настройки** | Параметры по умолчанию для новых анализов: режим «Быстро/Точнее», частота анализа, узнавание людей, способ объединения лица и голоса. Модели, трекер и устройство — в блоке «Для специалистов». Внизу показано, сколько места занимают записи и загрузки и когда они удаляются. |
+
+Камера браузера доступна только на `localhost` или по HTTPS — таково требование браузеров к `getUserMedia`.
+Поэтому фронтенд слушает и **https://localhost:8443**. При первом старте он создаёт самоподписанный
+сертификат. Как подключить камеру телефона или другого компьютера в сети:
+
+1. Впишите адрес этого компьютера в `.env`: `TLS_HOSTS=192.168.1.10` (несколько — через запятую).
+2. Если сертификат уже создан, удалите его (`docker volume rm facial-emotion-analyzer_frontend_certs`) и
+   перезапустите `frontend`.
+3. Откройте на устройстве `https://192.168.1.10:8443` и согласитесь с предупреждением браузера о сертификате.
+
+Чтобы предупреждения не было, положите в том `frontend_certs` свои `affectra.crt` и `affectra.key`, например
+от [mkcert](https://github.com/FiloSottile/mkcert).
+
+**Автоочистка.** По умолчанию записи и загрузки хранятся, пока их не удалят вручную. С
+`RECORDINGS_RETENTION_DAYS=30` и `UPLOADS_RETENTION_DAYS=7` в `.env` веб-сервер раз в час удаляет записи
+старше 30 дней и загрузки старше 7 дней. Идущие сессии и файлы, которые сейчас обрабатываются, не трогаются.
 
 ---
 
-## 9. API кратко
+## 3. Архитектура
+
+Сервисы общаются через Kafka и не знают друг о друге; каждый можно перезапускать независимо и вынести на
+отдельную машину. Веб-сервер медиа не читает: сессии запускает сервис приёма `ingest` по командам, а их
+статусы возвращаются через compacted-топик, поэтому перезапуск веб-сервера сессии не прерывает.
+
+```mermaid
+flowchart LR
+    src([камера браузера / файл / RTSP])
+    web["webapp (FastAPI)\nсессии · загрузки · WS · API"]
+    ing["ingest\nпродюсеры сессий"]
+    cmd[(session-commands\nsession-status)]
+    raw[(raw-video-frames\nraw-audio-chunks)]
+    vc["consumer\nлица → трек → эмоции лица"]
+    ac["audio-consumer\nVAD → эмоции голоса"]
+    va[(vision-analytics)]
+    aa[(audio-analytics)]
+    fu["fusion\nслияние лица и голоса"]
+    fa[(fused-analytics)]
+    ar["archiver\nитоговое видео + JSON"]
+    s3[(S3 · SeaweedFS)]
+    pg[(Postgres + pgvector)]
+    ui["frontend (React)"]
+
+    web <--> cmd <--> ing
+    src --> ing --> raw
+    raw --> vc --> va --> fu
+    raw --> ac --> aa --> fu
+    fu --> fa --> web
+    raw --> ar
+    fa --> ar --> s3
+    vc -. лица, таймсерии .-> pg
+    fu -. слитые таймсерии .-> pg
+    ar -. статус записи .-> pg
+    web <-- "REST · WebSocket" --> ui
+```
+
+| Сервис | Файл | Что делает |
+|---|---|---|
+| webapp | `webapp.py` | API: запуск сессий командами, загрузки в S3, отдача кадров и аналитики в браузер, история, записи |
+| ingest | `ingest.py` | продюсеры сессий по командам: читает файл из S3, поток или камеру браузера (WebSocket) и пишет кадры и звук в Kafka; статусы сессий |
+| consumer | `consumer.py` | YuNet раз в 2 кадра + трекер ByteTrack, идентификация FaceNet → pgvector, эмоции лица по окну 3 с (8 или 16 кадров) |
+| audio-consumer | `audio_consumer.py` | окна 3 с с шагом 1 с; энергетический VAD → Silero VAD → WavLM только на речи |
+| fusion | `fusion_consumer.py` | сопоставляет окно лица с окном голоса и сливает их выбранным методом |
+| visualizer | `visualizer.py` | фоновая серверная разметка кадров (`annotated-video`) |
+| archiver | `archiver.py` | копит кадры, звук и слитую аналитику сессии на диске, после конца собирает mp4 (H.264 + AAC) и JSON и кладёт в S3 |
+| frontend | `frontend/` | React + Vite + Tailwind, раздаётся nginx |
+
+В реальном времени браузер получает исходные кадры (`/api/live`) и аналитику (`/api/events`) и сам
+рисует рамки, совмещая их по времени кадра. Итоговое видео с разметкой собирается уже после сессии.
+
+Подробности по модулям — в [`docs/`](docs/ARCHITECTURE.md), развёртывание — в [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
+
+## 4. Модели и качество
+
+Модели обучены на CREMA-D и проверены диктор-независимо. UAR — средняя по классам полнота,
+среднее по 10 прогонам (5 фолдов × 2 сида), см. `models/crema/usage_rules.md`.
+
+| Модальность | Модель | UAR |
+|---|---|---:|
+| лицо | Swin-T (кадры) + временная голова, окно 3 с | 0.689 |
+| голос | WavLM-Base+, окно 3 с | 0.761 |
+| лицо + голос | `stack_hidden` (стекинг по эмбеддингам) | 0.840 |
+
+По умолчанию используются int8-версии моделей; fp32 включается режимом «Точнее» в настройках.
+Детектор речи — [Silero VAD](https://github.com/snakers4/silero-vad) v5.1.2 (MIT).
+
+## 5. Производительность
+
+Ноутбук Intel Core i5-1135G7, только CPU, int8-модели.
+
+**Видео** (источник 20 кадров/с, файл 1080p60): анализ успевает за источником без потерь — 20 кадров/с,
+задержка от захвата до аналитики p50 37–113 мс. Детектор раз в 2 кадра с предсказанием трекера даёт
+IoU рамок 0.93 и совпадение эмоций 98.7% с детекцией на каждом кадре.
+
+**Голос**: Silero VAD отсекает окна без речи до модели эмоций. Ролик 40 с: 10 с речи, затем музыка,
+шум и тишина:
+
+| Детектор речи | Окон до модели голоса | CPU аудиосервиса |
+|---|---:|---:|
+| энергетический | 30 из 38 | 48% |
+| Silero (по умолчанию) | 10 из 38 | 15% |
+
+Silero стоит 15–20 мс на окно 3 с (около 3% времени WavLM). Вдобавок пропадают ложные «эмоции голоса»
+на музыке и шуме.
+
+## 6. Настройка
+
+Главные переменные окружения (полный список — `.env.example`):
+
+| Переменная | По умолчанию | Смысл |
+|---|---|---|
+| `EMOTION_MODEL_DEFAULT` | `crema-swin-int8` | модель лица для сессий без своих настроек |
+| `VOICE_MODEL_DEFAULT` | `crema-wavlm-int8` | модель голоса |
+| `FUSION_METHOD` | `stack_hidden` | метод слияния |
+| `DETECTION_FREQUENCY` | `2` | детектор лиц раз в N кадров |
+| `CLIP_FRAMES` | `8` | кадров на окно лица (8 или 16) |
+| `VAD_BACKEND` | `silero` | `silero` или `energy` |
+| `VAD_THRESHOLD` | `0.3` | доля речи в окне, начиная с которой работает модель голоса |
+| `EMOTION_NUM_THREADS` / `VOICE_NUM_THREADS` | `2` / `2` | потоки ONNX Runtime |
+| `ARCHIVE_MAX_DURATION_S` | `1800` | предел длительности итоговой записи |
+| `S3_ACCESS_KEY` / `S3_SECRET_KEY` | `affectra` / `affectra-secret` | ключи хранилища записей |
+| `KAFKA_BOOTSTRAP` | `kafka:29092` | брокеры Kafka для всех сервисов, если Kafka вынесена на другие машины |
+| `KAFKA_EXTERNAL_HOST` | `localhost` | имя хоста, которое брокеры сообщают клиентам вне Docker |
+
+Параметры отдельной сессии (модели, частота, слияние, узнавание людей) задаются в интерфейсе и
+передаются сервисам через компактируемый топик `session-config`.
+
+## 7. Разработка без Docker для Python-сервисов
+
+```bash
+docker compose up -d kafka topics-init postgres s3
+```
+
+```bash
+python -m venv venv
+```
+
+```bash
+venv/Scripts/pip install -r requirements.txt
+```
+
+Модель Silero VAD для локального запуска (без неё аудиосервис работает с энергетическим VAD):
+
+```bash
+curl -L -o models/vad/silero_vad.onnx --create-dirs https://github.com/snakers4/silero-vad/raw/v5.1.2/src/silero_vad/data/silero_vad.onnx
+```
+
+Затем в отдельных терминалах: `python ingest.py` (приём медиа, :8001), `python consumer.py`,
+`python audio_consumer.py`, `python fusion_consumer.py`, `python visualizer.py`, `python archiver.py`,
+`python webapp.py` (API на :8000). Сервисам, работающим с S3 (webapp, ingest, archiver), нужны
+`S3_ENDPOINT=http://localhost:8333` и ключи из `.env`. Фронтенд:
+
+```bash
+npm --prefix frontend install
+```
+
+```bash
+npm --prefix frontend run dev
+```
+
+Dev-сервер — http://localhost:5173, `/api` проксируется на :8000, `/api/capture` — на :8001.
+
+**Тесты**
+
+```bash
+venv/Scripts/python -m pytest -q
+```
+
+```bash
+npx --prefix frontend tsc --noEmit -p frontend
+```
+
+Тесты, которым нужны Kafka или PostgreSQL, пропускаются, если те не запущены.
+
+## 8. API кратко
 
 | Метод | Путь | Назначение |
 |---|---|---|
-| GET | `/api/health` | health-check |
-| GET | `/api/sessions?kind=camera\|upload` | список активных сессий |
-| POST | `/api/sessions/camera` | создать сессию-камеру |
+| GET | `/api/health` | связь и готовность сервисов: какие модели ещё загружаются |
+| GET | `/api/storage` | объём записей и загрузок, сроки автоочистки |
+| GET | `/api/sessions` | активные и завершённые сессии |
+| POST | `/api/sessions/camera` | сессия по адресу потока (RTSP/HTTP, номер камеры) |
+| POST | `/api/sessions/browser` | сессия с камерой браузера; медиа идёт по WS `/api/capture/{id}` (сервис приёма) |
 | DELETE | `/api/sessions/{id}` | остановить сессию |
-| DELETE | `/api/sessions` | остановить все |
-| POST | `/api/uploads` | загрузить файл |
-| POST | `/api/uploads/session` | запустить обработку файла |
-| GET | `/api/uploads` | список ранее загруженных файлов |
-| GET | `/api/stream/{id}` | MJPEG (multipart/x-mixed-replace) |
-| WS | `/api/events/{id}` | события аналитики в реальном времени |
-| POST | `/api/history/search` | поиск top-K похожих лиц по фото |
-| GET | `/api/history/users/{id}` | полная история эмоций пользователя |
-| GET | `/api/history/users/{id}/face` | JPEG лица пользователя |
-| GET | `/api/history/users/{id}/export.csv` | CSV-экспорт сэмплов |
-| GET | `/api/history/sessions/{id}` | история эмоций конкретной сессии |
-| GET | `/api/history/sessions/{id}/export.csv` | CSV-экспорт сессии |
+| POST / GET | `/api/uploads` | загрузить файл в хранилище / список загруженных |
+| POST | `/api/uploads/session` | запустить анализ загруженного файла |
+| DELETE | `/api/uploads/{id}` | удалить файл (409, если он сейчас обрабатывается) |
+| WS | `/api/live/{id}` | исходные кадры для отрисовки в браузере |
+| WS | `/api/events/{id}` | аналитика в реальном времени |
+| GET | `/api/recordings` | итоговые записи сессий и их статус |
+| GET | `/api/recordings/{id}/video` | mp4 записи (поддерживает Range) |
+| GET | `/api/recordings/{id}/analytics` | JSON-аналитика записи |
+| POST | `/api/history/search` | поиск похожих лиц по фото |
+| GET | `/api/history/users/{id}` | история эмоций человека |
+| GET | `/api/history/sessions/{id}/export.csv` | выгрузка сессии в CSV |
 
-Полная спецификация — на `/docs` после запуска (Swagger).
+Полная спецификация — на `/docs` после запуска.
 
----
+## 9. Структура репозитория
+
+```
+ingest.py · consumer.py · audio_consumer.py · fusion_consumer.py · visualizer.py · archiver.py · webapp.py · producer.py
+src/
+  ingest/               сервис приёма: команды, продюсеры сессий, статусы, WebSocket браузера
+  video_producing/      источники (файл, поток, вебкамера, камера браузера) и продюсер в Kafka
+  frames_processing/    детекция, трекинг, идентификация, эмоции лица по окну кадров
+  audio_processing/     окна звука, VAD (энергия + Silero), эмоции голоса
+  fusion/               слияние лица и голоса, запись слитых таймсерий
+  session_archive/      спул сессии, рендер mp4 + JSON, клиент S3
+  session_config/       настройки сессий через топик session-config
+  video_annotating/     отрисовка рамок и подписей
+  emotion_kit/          инференс моделей CREMA-D (ONNX) и методы слияния
+  db_managing/          схема БД и миграции
+  web_server/           FastAPI: роуты и сервисы
+  object_storage.py     клиент S3
+frontend/               React-интерфейс
+deploy/                 стек Docker Swarm и отправка образов в реестр
+models/crema/           модели CREMA-D, параметры слияния, отчёт о качестве
+scripts/                бенчмарк, проверки, утилиты
+tests/                  pytest
+docs/                   архитектура, развёртывание, описание модулей
+```
 
 ## 10. Ограничения и этика
 
-- Эмоции по выражению лица — **сигнал, а не истина**. Распознавание известно
-  своей культурной предвзятостью; не следует принимать на его основе
-  решений в отношении конкретных людей.
-- Идентификация лица не должна использоваться без согласия субъекта.
-- Все данные (эмбеддинги, JPEG лиц, таймсерии) хранятся локально и удаляются
-  по запросу из настроек.
+- Эмоция по лицу и голосу — **сигнал, а не истина**. Модели обучены на актёрских записях CREMA-D
+  и могут ошибаться на спонтанной речи и мимике; не принимайте на их основе решений о людях.
+- Узнавание людей хранит эмбеддинги и снимки лиц; используйте его только с согласия участников.
+  Его можно выключить в настройках.
+- Все данные (загрузки, записи, таймсерии, лица) хранятся локально: в PostgreSQL и в томе S3-хранилища.
+  Загрузки удаляются на главной странице, записи — в разделе «Записи».

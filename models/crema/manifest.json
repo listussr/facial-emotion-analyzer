@@ -1,0 +1,116 @@
+{
+ "classes": [
+  "ANG",
+  "DIS",
+  "FEA",
+  "HAP",
+  "NEU",
+  "SAD"
+ ],
+ "classes_ru": [
+  "гнев",
+  "отвращение",
+  "страх",
+  "радость",
+  "нейтральное",
+  "грусть"
+ ],
+ "source_run": "s1_f3",
+ "exported_with": {
+  "torch": "2.14.0+cu126",
+  "transformers": "5.17.0",
+  "onnxruntime": "1.31.0",
+  "audio_onnx_opset": 17,
+  "video_onnx_opset": 18
+ },
+ "files": {
+  "emotion_kit/__init__.py": {
+   "bytes": 326,
+   "sha256": "0db247247947e4a6d7a5a4613e4aa3839f1f472ef7b2df9efb687b88aad06d11"
+  },
+  "emotion_kit/backends.py": {
+   "bytes": 5430,
+   "sha256": "db3cf95ba07f31bf1fb40913c0e43fdb36c5d1c69e8b2e39d73f430abd0dc719"
+  },
+  "emotion_kit/cli.py": {
+   "bytes": 1681,
+   "sha256": "8776b9af372f9b818bc32acc95d32868e0d381ad955f28ab32ce79126598c406"
+  },
+  "emotion_kit/fusion.py": {
+   "bytes": 3425,
+   "sha256": "0af1ce07f6549a5c0f05d3f9d0166472c8bf3c4afbd702883125ab2b3b6b4473"
+  },
+  "emotion_kit/pipeline.py": {
+   "bytes": 3031,
+   "sha256": "98204083a6d1e860a26a6f839deeb57aeb01678c702e9827103070e6c0097c6e"
+  },
+  "emotion_kit/preprocess.py": {
+   "bytes": 8767,
+   "sha256": "152343d69e174211cf1681e4df8668c850c0af9608e3f2de4dc66f80a3513608"
+  },
+  "emotion_kit/selftest.py": {
+   "bytes": 1988,
+   "sha256": "f866e325356691c77317ff5fb8564766ba8ce77c0c15d0e498b2fcb39db18577"
+  },
+  "emotion_kit/torch_models.py": {
+   "bytes": 7329,
+   "sha256": "475c0cdbced16b7c104ae1077139d27ea19d02617eb32df23954899097dbe33f"
+  },
+  "models/audio_wavlm_base_plus.onnx": {
+   "bytes": 379021827,
+   "sha256": "232b93cdcf39f77da1bdd52a8a685e3fbf060f7c4d842b05c8d37173e3ae1ecd"
+  },
+  "models/audio_wavlm_base_plus.pt": {
+   "bytes": 378569219,
+   "sha256": "f0b889cd4b78504dc26afd3987ded0840bfc88d9e34003d3a5b755fbce2665e2"
+  },
+  "models/audio_wavlm_base_plus_int8.onnx": {
+   "bytes": 123079336,
+   "sha256": "9613a41b428c36e408a01c3c9a2b63eb9628e1ffa351042cbb70977cc82e3f49"
+  },
+  "models/eval.json": {
+   "bytes": 11539,
+   "sha256": "462631a29431472be6a0ffeb0230da83a5621b466e9e638d30f9079967a2ebaf"
+  },
+  "models/export.json": {
+   "bytes": 22,
+   "sha256": "837cb054d88cf4dee32b410279a5f9ee0b20bf95279d5deb42a9a9c0f968a526"
+  },
+  "models/face_detection_yunet_2023mar.onnx": {
+   "bytes": 232589,
+   "sha256": "8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4"
+  },
+  "models/fusion_params.json": {
+   "bytes": 92406,
+   "sha256": "c1c8120805272da94f64ed1fa5ec2b228ff26a6fd6b67c702a15968fce0d5382"
+  },
+  "models/selftest.npz": {
+   "bytes": 9829712,
+   "sha256": "561a02bf760bf7a6e4f7cdaa10302fc1c97a907c9697bd226747e6d2614a0749"
+  },
+  "models/video_fer_swin_temporal.pt": {
+   "bytes": 113430385,
+   "sha256": "b7ddc6e746dd5076f9f503de93d9fa09ff64ecb4342a2d564ddd023e1058296b"
+  },
+  "models/video_frame_encoder_swin_t.onnx": {
+   "bytes": 113131676,
+   "sha256": "82c5589abaeb752b15fde5b7e346529511d131feb223d0e9a52bb5df24b70c42"
+  },
+  "models/video_frame_encoder_swin_t_int8.onnx": {
+   "bytes": 30974373,
+   "sha256": "6ef1ac8b17a7b30c2dabf1c82d4ec95053286bf9a89ba16c40803408504864b4"
+  },
+  "models/video_temporal_head.onnx": {
+   "bytes": 3206050,
+   "sha256": "4f337006d4fd5f942c494ddaa2102e1b630aa8e0d9c625707f330c33a2705bab"
+  },
+  "requirements.txt": {
+   "bytes": 673,
+   "sha256": "c333087dddcdcf37b03c9c280e879ef8b1a347252b2d835c91d7bc3f6e7e1650"
+  },
+  "usage_rules.md": {
+   "bytes": 27575,
+   "sha256": "7294cd86d0598965b6eeaadfbd7d25f42567e4532ea2e00545de60dd1b8d4f3b"
+  }
+ }
+}

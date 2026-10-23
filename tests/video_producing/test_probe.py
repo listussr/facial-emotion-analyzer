@@ -7,7 +7,7 @@ from pathlib import Path
 
 pytest.importorskip("av")
 
-from src.web_server.services.media_probe import MediaProbe, check_modalities, probe_source
+from src.video_producing.probe import MediaProbe, check_modalities, probe_source
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
 from make_sync_test import make  # noqa: E402

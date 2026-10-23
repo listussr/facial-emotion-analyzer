@@ -1,122 +1,126 @@
-# Точки входа: `consumer.py`, `visualizer.py`, `webapp.py`, `producer.py`
+# Точки входа
 
-Четыре скрипта в корне репозитория. Все они намеренно тонкие: собирают
-настройки (в основном из переменных окружения), создают один объект из
-`src/` и передают ему управление. Логика в них не живёт — если хочется
-что-то поменять «по-настоящему», это почти всегда правка внутри `src/`.
+В корне репозитория лежат восемь скриптов запуска. Каждый читает настройки из переменных окружения,
+собирает объекты из `src/` и запускает бесконечный цикл обработки. В Docker все они живут в одном образе
+(`Dockerfile.python`) и отличаются командой в `docker-compose.yml`.
+
+| Скрипт | Цикл | Читает | Пишет |
+|---|---|---|---|
+| `webapp.py` | uvicorn + FastAPI | `session-status`, `fused-analytics`, `raw-video-frames`, `annotated-video` | `session-config`, `session-commands`, БД, S3 |
+| `ingest.py` | uvicorn + `IngestService.process` | `session-commands`, `session-status`, WebSocket браузера, S3 | медиа и события сессий, `session-status` |
+| `consumer.py` | `ProcessingPipeline.process` | `raw-video-frames`, `session-events`, `session-config` | `vision-analytics`, БД |
+| `audio_consumer.py` | `AudioPipeline.process` | `raw-audio-chunks`, `session-events`, `session-config` | `audio-analytics` |
+| `fusion_consumer.py` | `FusionService.process` | `vision-analytics`, `audio-analytics`, `session-events`, `session-config` | `fused-analytics`, БД |
+| `visualizer.py` | `VideoAnnotator.run` | `raw-video-frames`, `fused-analytics` | `annotated-video` |
+| `archiver.py` | `ArchiveService.process` | `raw-video-frames`, `raw-audio-chunks`, `fused-analytics`, `session-events` | S3, БД |
+| `producer.py` | `CameraProducer` | источник | медиа и события |
 
 ---
 
-## `consumer.py` — конвейер обработки
+## `webapp.py`
 
-Поднимает [`ProcessingPipeline`](frames_processing.md) и вызывает
-`pipeline.process()` (блокирующий цикл до `Ctrl+C`).
+Ограничивает потоки OpenCV и запускает `uvicorn` с `src.web_server.main:app` на порту 8000. Сессии запускает
+командами сервису приёма. Настройки — `AFFECTRA_*` и `S3_*` (см. [web_server.md](web_server.md)).
 
-Собирает пять словарей настроек:
+## `ingest.py`
 
-| Словарь | Что настраивает | Ключевые переменные окружения |
+Сервис приёма медиа: `IngestService` (цикл команд и статусов в фоновом потоке) и FastAPI-приложение с
+WebSocket камеры браузера и `/health` на порту `INGEST_PORT` (8001). Настройки — `TOPIC_SESSION_COMMANDS`,
+`TOPIC_SESSION_STATUS`, `INGEST_GROUP_ID`, `INGEST_CACHE_DIR`, `S3_*` (см. [ingest.md](ingest.md)).
+Несколько узлов приёма делят сессии через группу Kafka, а WebSocket браузера, попавший не на тот узел,
+пересылается владельцу сессии (`INGEST_ADVERTISED_ADDRESS`).
+
+## `consumer.py`
+
+Видеопайплайн. Собирает настройки детектора, модели, трекера и идентификации, запускает хранилище
+конфигов сессий и `ProcessingPipeline`.
+
+| Переменная | По умолчанию | Смысл |
 |---|---|---|
-| `kafka_settings` | адрес брокера, входной/выходной топики, `group_id` | `KAFKA_BOOTSTRAP_SERVERS`, `TOPIC_RAW`, `TOPIC_ANALYTICS`, `PIPELINE_GROUP_ID` |
-| `detector_settings` | порог MediaPipe | `DETECTOR_MIN_CONF` (default `0.8`) |
-| `analyzer_settings` | модель эмоций по умолчанию, устройство, число ORT-потоков | `EMOTION_MODEL_DEFAULT`, `EMOTION_DEVICE_DEFAULT`, `EMOTION_NUM_THREADS` |
-| `identifier_settings` | подключение к Postgres и порог схожести лиц | `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD`, `IDENTIFIER_THRESHOLD` |
-| `tracker_settings` | тип трекера + параметры обоих алгоритмов сразу | `TRACKER_DEFAULT` |
+| `DETECTOR_BACKEND` | `yunet` | `yunet` или `mediapipe` |
+| `DETECTOR_MIN_CONF` | `0.6` | порог уверенности детектора |
+| `DETECTOR_MAX_SIDE` | `480` | длинная сторона кадра для YuNet |
+| `DETECTION_FREQUENCY` | `2` | детектор раз в N кадров |
+| `EMOTION_MODEL_DEFAULT` | `crema-swin-int8` | модель лица по умолчанию |
+| `EMOTION_NUM_THREADS` | `2` | потоки ONNX Runtime модели лица |
+| `CLIP_FRAMES` | `8` | кадров на окно (8 или 16) |
+| `EMOTION_HOP_MS` / `CLIP_WINDOW_MS` | `1000` / `3000` | шаг и длина окна эмоций |
+| `TRACKER_DEFAULT` | `bytetrack` | `bytetrack` или `deepsort` |
+| `IDENTIFICATION_ENABLED` | `true` | узнавание людей через БД |
+| `IDENTIFIER_THRESHOLD` | `0.4` | порог косинусного расстояния FaceNet |
+| `MAX_FRAME_AGE_MS` | `1000` | кадры старше отбрасываются, `0` — не отбрасывать |
+| `SESSION_CONFIG_READY_TIMEOUT` | `10` | ожидание чтения `session-config` при старте |
 
-`tracker_settings` содержит ключи и DeepSORT (`max_age`, `n_init`,
-`nn_budget`, `max_cosine_distance`, `embedder_model_name`), и ByteTrack
-(`track_activation_threshold`, `lost_track_buffer`,
-`minimum_matching_threshold`, `frame_rate`, `minimum_consecutive_frames`).
-Лишние ключи конкретная реализация просто игнорирует — это позволяет
-переключать `type` без правки конфига.
+Если топик конфигов не готов, сервис работает на значениях по умолчанию и подхватывает конфиги позже.
 
-Значения из `analyzer_settings` / `tracker_settings` — **дефолты**. Если в
-Kafka-сообщении пришёл `session_config` (а веб-сервер его всегда кладёт),
-пайплайн для этой сессии использует модель и трекер оттуда.
+## `audio_consumer.py`
 
-```bash
-python consumer.py
-```
+Аудиопайплайн с пониженным приоритетом. `make_speech_vad()` создаёт Silero VAD, если
+`VAD_BACKEND=silero` и файл модели на месте, иначе остаётся только энергетический VAD (с предупреждением
+в логе).
 
----
+| Переменная | По умолчанию | Смысл |
+|---|---|---|
+| `VOICE_MODEL_DEFAULT` | `crema-wavlm-int8` | модель голоса |
+| `VOICE_NUM_THREADS` | `2` | потоки ONNX Runtime |
+| `AUDIO_WINDOW_MS` / `AUDIO_HOP_MS` | `3000` / `1000` | окно и шаг |
+| `VAD_THRESHOLD` | `0.3` | доля речи в окне для запуска модели |
+| `VAD_THRESHOLD_DBFS` | `-45` | порог громкости энергетического VAD |
+| `VAD_BACKEND` | `silero` | `silero` или `energy` |
+| `VAD_MODEL_PATH` | `models/vad/silero_vad.onnx` | файл Silero VAD |
+| `VAD_FRAME_THRESHOLD` | `0.5` | порог вероятности речи в кадре Silero |
+| `MAX_CHUNK_AGE_MS` | `2000` | отсев устаревших чанков |
 
-## `visualizer.py` — аннотатор
+## `fusion_consumer.py`
 
-Создаёт [`VideoAnnotator`](video_annotating.md) и держит asyncio-loop живым:
+Сервис слияния и `FusionRecorder` для записи слитых таймсерий и голоса сессий в БД.
 
-```python
-annotator = VideoAnnotator(
-    ttl_frames=300,          # кадр ждёт свою аннотацию до 300 с
-    ttl_annotations=60,      # аннотация ждёт свой кадр до 60 с
-    cleanup_interval=5,      # чистка буферов раз в 5 с
-    kafka_bootstrap=..., frames_topic=..., annotations_topic=..., output_topic=...,
-)
-await annotator.run()
-```
+| Переменная | По умолчанию | Смысл |
+|---|---|---|
+| `FUSION_METHOD` | `stack_hidden` | метод слияния по умолчанию |
+| `FUSION_VOICE_MAX_AGE_MS` | `3000` | насколько старый голос можно взять для лица без окна |
+| `FUSION_MIN_OVERLAP_MS` | `1000` | минимальное перекрытие окон лица и голоса |
+| `FUSION_DB_ENABLED` | `true` | писать ли таймсерии в БД |
+| `FUSION_TRACK_TIMEOUT_S` | `3` | через сколько секунд без трека его таймсерия записывается |
+| `FUSION_MAX_FRAME_AGE_MS` | `2000` | отсев устаревших кадров |
 
-Переменные окружения: `KAFKA_BOOTSTRAP_SERVERS`, `TOPIC_RAW`,
-`TOPIC_ANALYTICS`, `TOPIC_ANNOTATED`.
+## `visualizer.py`
 
-```bash
-python visualizer.py
-```
+Фоновый `VideoAnnotator` с пониженным приоритетом: сопоставляет кадры с аналитикой по `frame_id` и пишет
+размеченные JPEG в `annotated-video`. В показе в реальном времени не участвует — там рамки рисует браузер.
 
-> Нюанс: `KeyboardInterrupt` внутри `asyncio.run` перехватывается не в том
-> месте, где стоит `try` (прерывание прилетает из `asyncio.sleep`), поэтому
-> `annotator.stop()` при `Ctrl+C` может не успеть отработать. На корректность
-> данных это не влияет — Kafka-продюсер аннотатора работает с `acks=0`.
+## `archiver.py`
 
----
+`ArchiveService` с клиентом S3 и фабрикой подключений к БД (`ARCHIVE_DB_ENABLED=false` — не писать
+статусы). Настройки: `ARCHIVE_SPOOL_DIR` (`data/archive_spool`), `ARCHIVE_ANALYTICS_GRACE_S` (15),
+`ARCHIVE_IDLE_TIMEOUT_S` (120), `ARCHIVE_MAX_DURATION_S` (1800), `ARCHIVE_RENDER_THREADS` (2), `S3_*`.
 
-## `webapp.py` — веб-сервер
+## `producer.py`
 
-Десять строк: запускает uvicorn с приложением
-[`src.web_server.main:app`](web_server.md) на `0.0.0.0:8000`.
-
-```bash
-python webapp.py
-```
-
-- Swagger: <http://localhost:8000/docs>
-- Health: <http://localhost:8000/api/health>
-
-`reload=False` — осознанно: при `reload=True` uvicorn перезапускает процесс
-вместе с уже поднятыми `CameraProducer`-ами и Kafka-диспетчерами.
-
----
-
-## `producer.py` — ручной продюсер (отладочный)
-
-Запускает один [`CameraProducer`](video_producing.md) с захардкоженным
-`CameraConfig` (по умолчанию — файл `src\test_videos\film.mp4`) и ждёт
-`Enter`, чтобы остановиться.
-
-Нужен, когда надо погонять пайплайн без веб-сервера и фронтенда: например,
-при профилировании или отладке новой модели. В штатном сценарии продюсеры
-создаёт `SessionManager` внутри `webapp.py`.
+Продюсер из командной строки — для отладки без веб-сервера:
 
 ```bash
-python producer.py
+python producer.py --source data/sync_test.mp4 --modalities video,audio --stop-on-end
 ```
 
-> Путь к тестовому видео в файле указан в Windows-нотации и относительно
-> корня репозитория — запускать нужно из корня проекта. Каталог
-> `src/test_videos/` в репозиторий не коммитится, видео кладётся туда вручную.
-
----
-
-## Порядок запуска
-
-```mermaid
-flowchart LR
-    infra["docker compose:<br/>kafka + postgres"] --> c[consumer.py]
-    infra --> v[visualizer.py]
-    infra --> w[webapp.py]
-    w --> ui["frontend (npm run dev)"]
+```bash
+python producer.py --source 0 --modalities video,audio --audio-device 1
 ```
 
-Строгой зависимости по времени нет — каждый сервис переживает отсутствие
-остальных (Kafka-топики создаются автоматически при первой записи), но без
-`consumer.py` не будет аналитики, а без `visualizer.py` — картинки в UI.
+`--source` принимает путь к файлу, `rtsp://…`, номер вебкамеры или `mic`; `--list-devices` выводит
+микрофоны. Конфиг сессии продюсер не публикует, поэтому сервисы обрабатывают такой поток на значениях по
+умолчанию (конфиг можно задать через `scripts/session_config_cli.py`).
 
-Всё то же самое одной командой: `docker compose up -d --build`
-(см. [`docker-compose.yml`](../../docker-compose.yml)).
+## Общие для сервисов переменные
+
+| Переменная | Смысл |
+|---|---|
+| `KAFKA_BOOTSTRAP_SERVERS` | брокеры Kafka через запятую (`kafka:29092` в compose, `localhost:9092` с хоста; в кластере — все три) |
+| `TOPIC_*` | имена топиков |
+| `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD` | PostgreSQL |
+| `OPENCV_NUM_THREADS` | потоки OpenCV, по умолчанию 1 |
+| `PROCESS_PRIORITY` | `low` (по умолчанию у фоновых сервисов) или `normal` |
+| `TOPIC_SERVICE_HEALTH`, `HEARTBEAT_INTERVAL_S`, `HEALTH_FILE` | сигнал живости и файл для healthcheck (см. [service_health.md](service_health.md)) |
+
+Все сервисы, кроме `webapp`, сразу при запуске публикуют сигнал `starting`, а после загрузки моделей — `ready`.
+| `CREMA_MODELS_DIR` | каталог моделей CREMA-D |

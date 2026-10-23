@@ -11,6 +11,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 import src.web_server.routes.recordings as rec
+import src.web_server.services.recordings as rec_service
 
 VIDEO = bytes(range(256)) * 4
 
@@ -69,8 +70,9 @@ def client(monkeypatch):
         if cur.sql.startswith("DELETE"):
             rows.pop(cur.params[0], None)
 
-    monkeypatch.setattr(rec, "get_cursor", get_cursor)
-    monkeypatch.setattr(rec, "storage", lambda: storage)
+    for module in (rec, rec_service):
+        monkeypatch.setattr(module, "get_cursor", get_cursor)
+        monkeypatch.setattr(module, "storage", lambda: storage)
     app = FastAPI()
     app.include_router(rec.router)
     c = TestClient(app)

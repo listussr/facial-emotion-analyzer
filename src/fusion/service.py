@@ -90,7 +90,7 @@ class FusionService:
         self.track_timeout_s    = track_timeout_s
         self.smoothing          = smoothing
         self.undetermined_below = undetermined_below
-        self.staleness          = StalenessFilter(max_frame_age_ms)
+        self.staleness          = StalenessFilter(max_frame_age_ms, name="analytics frames")
         self.latency            = LatencyWindow()
         self._cameras: Dict[str, _Camera] = {}
         self.frames_total  = 0

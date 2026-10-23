@@ -1,5 +1,6 @@
-import { ReactNode, useState } from 'react';
+import { ReactNode, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
+import { api, StorageInfo, StorageUsage } from '@/api/client';
 import Toggle from '@/components/Toggle';
 import { useUiPrefs } from '@/hooks/useUiPrefs';
 import { AnalysisDefaults, isRecommended, useAnalysisDefaults } from '@/hooks/useAnalysisDefaults';
@@ -145,6 +146,8 @@ export default function SettingsPage() {
         </Row>
       </section>
 
+      <StorageSection />
+
       <p className="hint">
         Как устроена система — на странице{' '}
         <Link to="/about" className="text-indigo-700 font-medium">
@@ -153,6 +156,44 @@ export default function SettingsPage() {
         .
       </p>
     </>
+  );
+}
+
+function StorageSection() {
+  const [info, setInfo] = useState<StorageInfo | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    api.storageInfo().then(setInfo, (e) => setError(e.message ?? 'Хранилище недоступно'));
+  }, []);
+  return (
+    <section className="glass p-6 mb-6 max-w-3xl">
+      <h2 className="text-lg font-bold mb-2">Хранение</h2>
+      {error && <p className="hint">{error}</p>}
+      {!info && !error && <p className="hint">Загрузка…</p>}
+      {info && (
+        <>
+          <StorageRow title="Итоговые записи" usage={info.recordings} />
+          <StorageRow title="Загруженные файлы" usage={info.uploads} />
+          <p className="hint mt-3">
+            Срок хранения задаётся при запуске сервера: <code>RECORDINGS_RETENTION_DAYS</code> и{' '}
+            <code>UPLOADS_RETENTION_DAYS</code> в файле <code>.env</code>. Удалить отдельную запись или файл можно
+            вручную в любой момент.
+          </p>
+        </>
+      )}
+    </section>
+  );
+}
+
+function StorageRow({ title, usage }: { title: string; usage: StorageUsage }) {
+  const size = usage.size_bytes >= 1e9 ? `${(usage.size_bytes / 1e9).toFixed(1)} ГБ` : `${Math.round(usage.size_bytes / 1e6)} МБ`;
+  const keep = usage.retention_days > 0 ? `удаляются через ${usage.retention_days} дн.` : 'хранятся, пока не удалите';
+  return (
+    <Row title={title} hint={keep}>
+      <span className="font-mono text-sm text-slate-700">
+        {usage.count} · {size}
+      </span>
+    </Row>
   );
 }
 
