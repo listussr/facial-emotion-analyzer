@@ -120,3 +120,66 @@ def test_stop_removes_config_after_producer(calls):
     assert m.stop(info.id) is True
     assert kinds(calls)[-2:] == ["stop", "delete"] and calls[-1][1] == info.id
     assert m.get(info.id) is None
+
+
+class AliveThread:
+    def is_alive(self):
+        return True
+
+
+def test_running_session_for_upload(calls, tmp_path):
+    m    = sm.SessionManager()
+    path = tmp_path / "abc.mp4"
+    path.write_bytes(b"x")
+    info = m.create_upload("Up", path, 20, SessionConfig())
+
+    assert m.running_session_for(path) is None
+    m._sessions[info.id].producer.thread = AliveThread()
+    assert m.running_session_for(path) == info.id
+    assert m.running_session_for(tmp_path / "other.mp4") is None
+
+
+def test_delete_upload_in_use_returns_409(calls, tmp_path, monkeypatch):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    import src.web_server.routes.uploads as uploads
+
+    m = sm.SessionManager()
+    monkeypatch.setattr(uploads, "session_manager", m)
+    monkeypatch.setattr(uploads.settings, "UPLOADS_DIR", tmp_path)
+    path = tmp_path / "abc.mp4"
+    path.write_bytes(b"x")
+    info = m.create_upload("Up", path, 20, SessionConfig())
+    m._sessions[info.id].producer.thread = AliveThread()
+
+    app = FastAPI()
+    app.include_router(uploads.router)
+    client = TestClient(app)
+
+    r = client.delete("/api/uploads/abc")
+    assert r.status_code == 409 and info.id in r.json()["detail"]
+    assert path.exists()
+
+    m._sessions[info.id].producer.is_running = False
+    assert client.delete("/api/uploads/abc").status_code == 200
+    assert not path.exists()
+    assert client.delete("/api/uploads/abc").status_code == 404
+
+
+def test_upload_keeps_original_name(calls, tmp_path, monkeypatch):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    import src.web_server.routes.uploads as uploads
+
+    monkeypatch.setattr(uploads.settings, "UPLOADS_DIR", tmp_path)
+    monkeypatch.setattr(uploads, "_upload_info", lambda path, filename, size, uploaded_at: uploads.UploadInfo(
+        upload_id=path.stem, filename=filename, size=size, saved_path=str(path), has_video=True))
+    app = FastAPI()
+    app.include_router(uploads.router)
+    client = TestClient(app)
+
+    up = client.post("/api/uploads", files={"file": ("Мой ролик.mp4", b"data")}).json()
+    assert up["filename"] == "Мой ролик.mp4"
+    assert [u["filename"] for u in client.get("/api/uploads").json()] == ["Мой ролик.mp4"]
+    assert client.delete(f"/api/uploads/{up['upload_id']}").status_code == 200
+    assert list(tmp_path.iterdir()) == []

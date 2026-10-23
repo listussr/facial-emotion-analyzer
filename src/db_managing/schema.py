@@ -40,7 +40,56 @@ MIGRATIONS: List[Tuple[str, str]] = [
         CREATE INDEX IF NOT EXISTS idx_session_audio_camera
             ON session_audio_timeseries(camera_id);
     """),
+    ("003_session_recordings", """
+        CREATE TABLE IF NOT EXISTS session_recordings (
+            camera_id TEXT PRIMARY KEY,
+            name TEXT,
+            kind TEXT,
+            status TEXT,
+            video_key TEXT,
+            analytics_key TEXT,
+            frames INTEGER,
+            duration_sec REAL,
+            size_bytes BIGINT,
+            has_audio BOOLEAN,
+            truncated BOOLEAN,
+            summary JSONB,
+            error TEXT,
+            started_at TIMESTAMP WITH TIME ZONE,
+            finished_at TIMESTAMP WITH TIME ZONE,
+            updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_session_recordings_started
+            ON session_recordings(started_at DESC);
+    """),
 ]
+
+RECORDING_STATUSES: Tuple[str, ...] = ("recording", "rendering", "ready", "failed")
+RECORDING_FIELDS: Tuple[str, ...]   = ("name", "kind", "status", "video_key", "analytics_key", "frames",
+                                       "duration_sec", "size_bytes", "has_audio", "truncated", "summary",
+                                       "error", "started_at", "finished_at")
+
+
+def upsert_recording_sql(fields: Sequence[str]) -> str:
+    """
+    Запрос вставки или обновления записи сессии только по переданным полям.
+
+    Args:
+        fields (Sequence[str]): Поля из RECORDING_FIELDS.
+
+    Raises:
+        ValueError: Неизвестное поле.
+
+    Returns:
+        str: SQL с параметрами camera_id и значениями полей по порядку.
+    """
+    unknown = [f for f in fields if f not in RECORDING_FIELDS]
+    if unknown:
+        raise ValueError(f"Unknown recording fields: {unknown}")
+    columns = ", ".join(("camera_id", *fields, "updated_at"))
+    values  = ", ".join(["%s"] * (len(fields) + 1) + ["NOW()"])
+    updates = ", ".join([f"{f} = EXCLUDED.{f}" for f in fields] + ["updated_at = NOW()"])
+    return f"INSERT INTO session_recordings ({columns}) VALUES ({values}) ON CONFLICT (camera_id) DO UPDATE SET {updates}"
 
 
 def ensure_schema(conn) -> None:

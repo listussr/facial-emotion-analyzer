@@ -10,6 +10,7 @@ import numpy as np
 
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict
+from typing import List
 from typing import Tuple
 
 from confluent_kafka import Consumer
@@ -27,6 +28,40 @@ COLORS = {
     "sad": (0, 0, 255),
     "surprise": (255, 165, 0)
 }
+
+
+def draw_faces(frame: np.ndarray, faces: List[Dict], details: bool = False) -> np.ndarray:
+    """
+    Рамки и подписи эмоций; неуверенная оценка рисуется серой рамкой с подписью undetermined.
+
+    Args:
+        frame   (np.ndarray)      : Кадр BGR, рисуется на месте.
+        faces   (List[Dict])      : Лица аналитики с bbox, emotion и emotion_scores.
+        details (bool, optional)  : Подпись оценок лица и голоса под рамкой. Defaults to False.
+
+    Returns:
+        np.ndarray: Тот же кадр.
+    """
+    for face in faces:
+        x1, y1, x2, y2 = map(int, face["bbox"])
+        emotion        = face.get("emotion")
+        label_y        = max(y1 - 10, 16)
+
+        if emotion is None or emotion not in COLORS:
+            color = (200, 200, 200)
+            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 1)
+            if face.get("emotion_scores"):
+                cv2.putText(frame, "undetermined", (x1, label_y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+        else:
+            color = COLORS[emotion]
+            score = max(face["emotion_scores"])
+            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+            cv2.putText(frame, f"{emotion}: {score:.2f}", (x1, label_y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+
+        if details:
+            parts = [f"face: {face.get('face_emotion') or '-'}", f"voice: {face.get('voice_emotion') or '-'}"]
+            cv2.putText(frame, "  ".join(parts), (x1, y2 + 18), cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 1)
+    return frame
 
 
 def _serialize_frame_message(camera_id: str, frame_id: str, jpeg_data: bytes) -> bytes:
@@ -150,24 +185,7 @@ class VideoAnnotator(object):
         return self._encode_frame_to_jpeg(annotated)
 
     def _draw_annotations(self, frame: np.ndarray, annotation: Dict) -> np.ndarray:
-        """Рамки и подписи эмоций; неуверенная оценка рисуется серой рамкой с подписью undetermined."""
-        for face in annotation.get("faces", []):
-            x1, y1, x2, y2 = map(int, face["bbox"])
-            emotion        = face["emotion"]
-
-            if emotion is None or emotion not in COLORS:
-                cv2.rectangle(frame, (x1, y1), (x2, y2), (200, 200, 200), 1)
-                if face.get("emotion_scores"):
-                    cv2.putText(frame, "undetermined", (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX,
-                                0.6, (200, 200, 200), 2)
-                continue
-
-            color = COLORS[emotion]
-            score = max(face["emotion_scores"])
-            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-            label = f"{emotion}: {score:.2f}"
-            cv2.putText(frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
-        return frame
+        return draw_faces(frame, annotation.get("faces", []))
 
     def _encode_frame_to_jpeg(self, frame: np.ndarray) -> bytes:
         success, buffer = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])

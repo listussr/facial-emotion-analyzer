@@ -66,7 +66,7 @@ export default function HistoryPage() {
     <>
       <div className="mb-6 flex items-end justify-between flex-wrap gap-3">
         <div>
-          <h1 className="text-3xl font-extrabold tracking-tight">История по лицу</h1>
+          <h1 className="text-3xl font-extrabold tracking-tight">Люди</h1>
           <p className="text-slate-600">
             Загрузите фотографию — система найдёт {prefs.searchTopK} самых похожих лиц
             из базы. Нажмите на нужного, чтобы открыть его историю эмоций.
@@ -87,10 +87,9 @@ export default function HistoryPage() {
           </div>
           <h3 className="font-bold text-lg">База лиц пуста</h3>
           <p className="text-sm text-slate-600 max-w-md mx-auto mt-1">
-            Чтобы здесь появились распознанные люди, обработайте видео на
-            странице <Link to="/uploads" className="text-indigo-700 font-medium">Видео</Link>{' '}
-            или подключите камеру в{' '}
-            <Link to="/settings" className="text-indigo-700 font-medium">Настройках</Link>.
+            Люди появятся здесь после первого{' '}
+            <Link to="/" className="text-indigo-700 font-medium">анализа</Link> с включённым
+            узнаванием людей.
           </p>
         </div>
       )}

@@ -10,6 +10,7 @@ from fastapi import BackgroundTasks
 from fastapi import HTTPException
 from fastapi import Query
 
+from ..schemas import CreateBrowserRequest
 from ..schemas import CreateCameraRequest
 from ..schemas import SessionInfo
 from ..schemas import SessionKind
@@ -42,6 +43,14 @@ def create_camera(req: CreateCameraRequest):
         )
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Failed to start camera: {e}")
+
+
+@router.post("/browser", response_model=SessionInfo)
+def create_browser(req: CreateBrowserRequest):
+    try:
+        return session_manager.create_browser(name=req.name, frame_rate=req.frame_rate, config=req.config)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Failed to start browser session: {e}")
 
 
 @router.delete("/{session_id}")

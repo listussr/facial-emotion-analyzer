@@ -1,355 +1,206 @@
-import { useState } from 'react';
-import { useSessions } from '@/hooks/useSessions';
-import { api } from '@/api/client';
+import { ReactNode, useState } from 'react';
+import { Link } from 'react-router-dom';
 import Toggle from '@/components/Toggle';
 import { useUiPrefs } from '@/hooks/useUiPrefs';
-import ProcessingOptions, { MODALITY_LABEL } from '@/components/ProcessingOptions';
-import {
-  EMOTION_MODELS, MODEL_CHIP, DEFAULT_EMOTION_MODEL, DEFAULT_VOICE_MODEL, DEFAULT_CLIP_FRAMES, DEFAULT_FUSION_METHOD,
-} from '@/data/models';
-import type { TrackerName, EmotionModel, Device, Modality, VoiceModel, ClipFrames, FusionMethod } from '@/types';
+import { AnalysisDefaults, isRecommended, useAnalysisDefaults } from '@/hooks/useAnalysisDefaults';
+import { CLIP_FRAMES_OPTIONS, EMOTION_MODELS, FUSION_METHODS, VOICE_MODELS } from '@/data/models';
+import type { ClipFrames, Device, EmotionModel, FusionMethod, TrackerName, VoiceModel } from '@/types';
 
-const TRACKER_LABEL: Record<TrackerName, string> = { deepsort: 'DeepSORT', bytetrack: 'ByteTrack' };
-const MODEL_OPTIONS = EMOTION_MODELS;
+const MODES: { value: string; label: string; hint: string; preset: Partial<AnalysisDefaults> }[] = [
+  {
+    value: 'fast',
+    label: 'Быстро',
+    hint: 'Подходит для живой камеры на обычном компьютере.',
+    preset: { model: 'crema-swin-int8', voiceModel: 'crema-wavlm-int8', clipFrames: 8 },
+  },
+  {
+    value: 'accurate',
+    label: 'Точнее',
+    hint: 'Немного точнее, но нагрузка на процессор примерно вдвое выше.',
+    preset: { model: 'crema-swin', voiceModel: 'crema-wavlm', clipFrames: 16 },
+  },
+];
+
+const FRAME_RATES = [10, 15, 20, 30];
+
+function modeOf(d: AnalysisDefaults): string | null {
+  const m = MODES.find((x) => Object.entries(x.preset).every(([k, v]) => d[k as keyof AnalysisDefaults] === v));
+  return m?.value ?? null;
+}
 
 export default function SettingsPage() {
-  const { sessions, error: listError, stop, refresh } = useSessions('camera');
+  const { defaults: d, update, reset } = useAnalysisDefaults();
   const { prefs, update: updatePrefs } = useUiPrefs();
-
-  const [name, setName] = useState('');
-  const [source, setSource] = useState('');
-  const [frameRate, setFrameRate] = useState(20);
-  const [frameRateError, setFrameRateError] = useState<string | null>(null);
-  const [tracker, setTracker] = useState<TrackerName>('bytetrack');
-  const [model, setModel] = useState<EmotionModel>(DEFAULT_EMOTION_MODEL);
-  const [device, setDevice] = useState<Device>('cpu');
-  const [modalities, setModalities] = useState<Modality[]>(['video', 'audio']);
-  const [voiceModel, setVoiceModel] = useState<VoiceModel>(DEFAULT_VOICE_MODEL);
-  const [identification, setIdentification] = useState(true);
-  const [clipFrames, setClipFrames] = useState<ClipFrames>(DEFAULT_CLIP_FRAMES);
-  const [fusionMethod, setFusionMethod] = useState<FusionMethod>(DEFAULT_FUSION_METHOD);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  const FPS_MIN = 1;
-  const FPS_MAX = 120;
-
-  async function addCamera() {
-    if (!name.trim() || !source.trim()) {
-      setError('Укажите имя и источник');
-      return;
-    }
-    if (frameRateError) {
-      setError(frameRateError);
-      return;
-    }
-    setBusy(true);
-    setError(null);
-    try {
-      await api.createCamera({
-        name: name.trim(),
-        source: source.trim(),
-        frame_rate: frameRate,
-        config: {
-          tracker, model, device, modalities, voice_model: voiceModel, identification,
-          clip_frames: clipFrames, fusion_method: fusionMethod,
-        },
-      });
-      setName('');
-      setSource('');
-      await refresh();
-    } catch (e: any) {
-      setError(e?.message || 'Не удалось создать камеру');
-    } finally {
-      setBusy(false);
-    }
-  }
+  const mode = modeOf(d);
+  const fusion = FUSION_METHODS.find((m) => m.value === d.fusionMethod);
 
   return (
     <>
       <div className="mb-6">
         <h1 className="text-3xl font-extrabold tracking-tight">Настройки</h1>
-        <p className="text-slate-600">
-          Подключения к камерам и параметры обработки по умолчанию.
+        <p className="text-slate-600 mt-1">
+          Эти параметры используются для каждого нового анализа. Изменения сохраняются сразу.
         </p>
       </div>
 
-      <div className="grid md:grid-cols-3 gap-6">
-        <section className="glass p-6 md:col-span-2">
-          <div className="flex items-center justify-between mb-4 gap-3 flex-wrap">
-            <h3 className="font-bold">Камеры</h3>
-            <div className="flex items-center gap-3">
-              <span className="text-xs text-slate-500">всего: {sessions.length}</span>
-              {sessions.length > 0 && (
-                <button
-                  type="button"
-                  className="btn btn-ghost text-xs py-1 px-2"
-                  title="Остановить все активные сессии"
-                  onClick={async () => {
-                    if (!confirm(`Остановить все ${sessions.length} сессий?`)) return;
-                    try {
-                      await api.stopAllSessions();
-                      await refresh();
-                    } catch (e: any) {
-                      setError(e?.message || 'Не удалось остановить сессии');
-                    }
-                  }}
-                >
-                  <svg width={14} height={14} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
-                    <rect x="6" y="6" width="12" height="12" rx="2" />
-                  </svg>
-                  Остановить все
-                </button>
-              )}
-            </div>
+      <section className="glass p-6 mb-6 max-w-3xl">
+        <div className="flex items-center justify-between gap-3 flex-wrap mb-2">
+          <h2 className="text-lg font-bold">Анализ</h2>
+          <button type="button" className="btn btn-ghost text-sm py-1.5" disabled={isRecommended(d)} onClick={reset}>
+            Вернуть рекомендуемые
+          </button>
+        </div>
+
+        <Row title="Режим" hint={MODES.find((m) => m.value === mode)?.hint ?? 'Свои модели — см. раздел «Для специалистов».'}>
+          <div className="seg">
+            {MODES.map((m) => (
+              <button key={m.value} type="button" className={mode === m.value ? 'active' : ''} onClick={() => update(m.preset)}>
+                {m.label}
+              </button>
+            ))}
           </div>
+        </Row>
 
-          {listError && <div className="text-sm text-rose-700 mb-3">{listError}</div>}
-
-          <div className="divide-y divide-indigo-100/60">
-            {sessions.length === 0 && (
-              <p className="text-sm text-slate-500 py-3">
-                Нет подключённых камер. Добавьте первую в форме ниже.
-              </p>
-            )}
-            {sessions.map((c) => {
-              if (c.kind !== 'camera') return null;
-              return (
-                <div key={c.id} className="py-3 flex items-center gap-4 flex-wrap">
-                  <span
-                    className="pulse-dot"
-                    style={{ background: c.status === 'live' ? '#22d3ee' : '#a78bfa' }}
-                  />
-                  <div className="flex-1 min-w-[200px]">
-                    <div className="font-medium">
-                      {c.id} · {c.name}
-                    </div>
-                    <div className="text-xs text-slate-500 font-mono break-all">{c.url}</div>
-                  </div>
-                  <span className="chip chip-on">{TRACKER_LABEL[c.tracker]}</span>
-                  <span className="chip">{MODEL_CHIP[c.model] || c.model}</span>
-                  <span
-                    className={`chip ${c.degraded ? 'chip-warn' : ''}`}
-                    title={c.degraded ? 'Источник не дал часть запрошенных модальностей' : ''}
-                  >
-                    {(c.modalities && c.modalities.length ? c.modalities : c.requestedModalities || [])
-                      .map((m) => MODALITY_LABEL[m])
-                      .join(' + ')}
-                  </span>
-                  <span
-                    className={
-                      c.status === 'live'
-                        ? 'chip chip-ok'
-                        : c.status === 'slow' || c.status === 'error'
-                        ? 'chip chip-warn'
-                        : 'chip'
-                    }
-                  >
-                    {c.status === 'live'
-                      ? 'в эфире'
-                      : c.status === 'slow'
-                      ? 'низкий FPS'
-                      : c.status === 'error'
-                      ? 'ошибка'
-                      : 'офлайн'}
-                  </span>
-                  <button className="btn btn-ghost text-sm" onClick={() => stop(c.id)}>
-                    Остановить
-                  </button>
-                </div>
-              );
-            })}
+        <Row title="Частота анализа" hint="Сколько кадров в секунду разбирать. Больше — плавнее, но выше нагрузка.">
+          <div className="seg">
+            {FRAME_RATES.map((f) => (
+              <button key={f} type="button" className={d.frameRate === f ? 'active' : ''} onClick={() => update({ frameRate: f })}>
+                {f}
+              </button>
+            ))}
           </div>
+        </Row>
 
-          <h4 className="font-semibold mt-8 mb-3">Добавить новую камеру</h4>
-          {error && <div className="text-sm text-rose-700 mb-3">{error}</div>}
-          <div className="grid md:grid-cols-2 gap-4">
-            <Field label="Название" value={name} onChange={setName} placeholder="например, «Лобби»" />
-            <Field
-              label="Источник"
-              value={source}
-              onChange={setSource}
-              placeholder="rtsp://…, 0 (вебкамера), mic (микрофон) или путь к файлу"
+        <Row title="Узнавать людей" hint="Запоминать лица, чтобы собирать историю эмоций человека между сессиями.">
+          <Toggle on={d.identification} onChange={(v) => update({ identification: v })} label="Узнавать людей" />
+        </Row>
+
+        <Row title="Как объединять лицо и голос" hint={fusion?.hint}>
+          <select
+            className="field sm:w-80"
+            value={d.fusionMethod}
+            onChange={(e) => update({ fusionMethod: e.target.value as FusionMethod })}
+          >
+            {FUSION_METHODS.map((m) => (
+              <option key={m.value} value={m.value}>
+                {m.label}
+              </option>
+            ))}
+          </select>
+        </Row>
+
+        <Expert>
+          <div className="grid sm:grid-cols-2 gap-4">
+            <Select
+              label="Модель лица"
+              value={d.model}
+              options={EMOTION_MODELS}
+              onChange={(v) => update({ model: v as EmotionModel })}
             />
-            <SelectField
-              label="Трекер"
-              value={tracker}
-              onChange={(v) => setTracker(v as TrackerName)}
+            <Select
+              label="Модель голоса"
+              value={d.voiceModel}
+              options={VOICE_MODELS}
+              onChange={(v) => update({ voiceModel: v as VoiceModel })}
+            />
+            <Select
+              label="Кадров на окно лица (3 с)"
+              value={String(d.clipFrames)}
+              options={CLIP_FRAMES_OPTIONS.map((o) => ({ value: String(o.value), label: `${o.label} — ${o.hint}` }))}
+              onChange={(v) => update({ clipFrames: Number(v) as ClipFrames })}
+            />
+            <Select
+              label="Трекер лиц"
+              value={d.tracker}
               options={[
+                { value: 'bytetrack', label: 'ByteTrack (рекомендуется)' },
                 { value: 'deepsort', label: 'DeepSORT' },
-                { value: 'bytetrack', label: 'ByteTrack' },
               ]}
+              onChange={(v) => update({ tracker: v as TrackerName })}
             />
-            <SelectField
-              label="Модель эмоций"
-              value={model}
-              onChange={(v) => setModel(v as EmotionModel)}
-              options={MODEL_OPTIONS}
-            />
-            <div>
-              <div className="label mb-1">Частота кадров</div>
-              <input
-                className="field"
-                type="number"
-                value={frameRate}
-                onChange={(e) => {
-                  const val = Number(e.target.value);
-                  setFrameRate(val);
-                  if (!Number.isFinite(val) || val < FPS_MIN || val > FPS_MAX) {
-                    setFrameRateError(
-                      `Допустимый диапазон: ${FPS_MIN}–${FPS_MAX} кадров/сек`
-                    );
-                  } else {
-                    setFrameRateError(null);
-                  }
-                }}
-              />
-              {frameRateError && (
-                <div className="text-xs text-rose-700 mt-1">{frameRateError}</div>
-              )}
-            </div>
-            <div>
-              <div className="label mb-1">Устройство вычислений</div>
-              <div className="seg w-full">
-                <button
-                  className={`flex-1 ${device === 'cpu' ? 'active' : ''}`}
-                  onClick={() => setDevice('cpu')}
-                >
-                  CPU
-                </button>
-                <button
-                  className={`flex-1 ${device === 'cuda' ? 'active' : ''}`}
-                  onClick={() => setDevice('cuda')}
-                >
-                  GPU
-                </button>
-              </div>
-            </div>
-          </div>
-          <div className="mt-4 md:w-1/2">
-            <ProcessingOptions
-              modalities={modalities}
-              onModalitiesChange={setModalities}
-              voiceModel={voiceModel}
-              onVoiceModelChange={setVoiceModel}
-              identification={identification}
-              onIdentificationChange={setIdentification}
-              clipFrames={clipFrames}
-              onClipFramesChange={setClipFrames}
-              fusionMethod={fusionMethod}
-              onFusionMethodChange={setFusionMethod}
+            <Select
+              label="Вычисления"
+              value={d.device}
+              options={[
+                { value: 'cpu', label: 'Процессор (CPU)' },
+                { value: 'cuda', label: 'Видеокарта (GPU, если есть)' },
+              ]}
+              onChange={(v) => update({ device: v as Device })}
             />
           </div>
-          <div className="mt-4 flex gap-2">
-            <button
-              className="btn btn-primary disabled:opacity-50"
-              onClick={addCamera}
-              disabled={busy}
-            >
-              {busy ? 'Подключение…' : 'Сохранить и подключить'}
-            </button>
-          </div>
-        </section>
+        </Expert>
+      </section>
 
-        <aside className="glass p-6">
-          <h3 className="font-bold mb-4">Глобальные значения</h3>
-          <p className="text-xs text-slate-500 mb-4">
-            Параметры обработки задаются для каждой сессии при её создании (публикуются
-            в <code>session-config</code>). Значения по умолчанию — в переменных окружения
-            сервисов обработки.
-          </p>
-          <div className="space-y-4">
-            <div>
-              <div className="label mb-1">
-                Похожих лиц при поиске{' '}
-                <span className="text-slate-400">(на странице «История»)</span>
-              </div>
-              <input
-                className="field"
-                type="number"
-                value={prefs.searchTopK}
-                onChange={(e) => updatePrefs({ searchTopK: Number(e.target.value) })}
-              />
-              {(prefs.searchTopK < 1 || prefs.searchTopK > 50 || !Number.isFinite(prefs.searchTopK)) && (
-                <div className="text-xs text-rose-700 mt-1">
-                  Допустимый диапазон: 1–50
-                </div>
-              )}
-            </div>
-            <hr className="border-indigo-100/60" />
-            <div className="flex items-center justify-between">
-              <div>
-                <div className="font-medium">Сохранять аннотированный поток</div>
-                <div className="text-xs text-slate-500">На диск, для каждой сессии</div>
-              </div>
-              <Toggle defaultOn />
-            </div>
-            <div className="flex items-center justify-between">
-              <div>
-                <div className="font-medium">Идентификация между камерами</div>
-                <div className="text-xs text-slate-500">Общая база лиц</div>
-              </div>
-              <Toggle defaultOn />
-            </div>
-            <div className="flex items-center justify-between">
-              <div>
-                <div className="font-medium">Скрывать ID лиц</div>
-                <div className="text-xs text-slate-500">Не показывать на скриншотах</div>
-              </div>
-              <Toggle />
-            </div>
-          </div>
-        </aside>
-      </div>
+      <section className="glass p-6 mb-6 max-w-3xl">
+        <h2 className="text-lg font-bold mb-2">Поиск человека по фото</h2>
+        <Row title="Сколько похожих показывать" hint="На странице «Люди».">
+          <input
+            className="field w-24"
+            type="number"
+            min={1}
+            max={50}
+            value={prefs.searchTopK}
+            onChange={(e) => updatePrefs({ searchTopK: Math.min(50, Math.max(1, Number(e.target.value) || 1)) })}
+          />
+        </Row>
+      </section>
+
+      <p className="hint">
+        Как устроена система — на странице{' '}
+        <Link to="/about" className="text-indigo-700 font-medium">
+          «О системе»
+        </Link>
+        .
+      </p>
     </>
   );
 }
 
-function Field({
-  label,
-  value,
-  onChange,
-  placeholder,
-}: {
-  label: string;
-  value: string;
-  onChange: (v: string) => void;
-  placeholder?: string;
-}) {
+function Row({ title, hint, children }: { title: string; hint?: string; children: ReactNode }) {
   return (
-    <div>
-      <div className="label mb-1">{label}</div>
-      <input
-        className="field"
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        placeholder={placeholder}
-      />
+    <div className="flex items-start justify-between gap-6 py-4 border-b border-slate-100 flex-wrap">
+      <div className="min-w-[200px] flex-1">
+        <div className="label">{title}</div>
+        {hint && <div className="hint mt-0.5 max-w-sm">{hint}</div>}
+      </div>
+      <div>{children}</div>
     </div>
   );
 }
 
-function SelectField({
+function Expert({ children }: { children: ReactNode }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="pt-4">
+      <button type="button" className="text-sm font-medium text-slate-600 hover:text-slate-900" onClick={() => setOpen((v) => !v)}>
+        {open ? '▾' : '▸'} Для специалистов
+      </button>
+      {open && <div className="mt-4">{children}</div>}
+    </div>
+  );
+}
+
+function Select({
   label,
   value,
-  onChange,
   options,
+  onChange,
 }: {
   label: string;
   value: string;
-  onChange: (v: string) => void;
   options: { value: string; label: string }[];
+  onChange: (v: string) => void;
 }) {
   return (
-    <div>
-      <div className="label mb-1">{label}</div>
-      <select className="field" value={value} onChange={(e) => onChange(e.target.value)}>
+    <label className="block">
+      <span className="label">{label}</span>
+      <select className="field mt-1" value={value} onChange={(e) => onChange(e.target.value)}>
         {options.map((o) => (
           <option key={o.value} value={o.value}>
             {o.label}
           </option>
         ))}
       </select>
-    </div>
+    </label>
   );
 }

@@ -1,6 +1,8 @@
 """Схемы API веб-сервера."""
 
 from datetime import datetime
+from typing import Any
+from typing import Dict
 from typing import List
 from typing import Literal
 from typing import Optional
@@ -39,6 +41,13 @@ class CreateCameraRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=80)
     source: Union[str, int]
     frame_rate: int = 20
+    config: SessionConfig = SessionConfig()
+
+
+class CreateBrowserRequest(BaseModel):
+    """Сессия с камерой и микрофоном браузера; modalities в config — какие дорожки он отдаёт."""
+    name: str = Field(..., min_length=1, max_length=80)
+    frame_rate: int = Field(default=15, ge=1, le=30)
     config: SessionConfig = SessionConfig()
 
 
@@ -88,3 +97,20 @@ class HealthInfo(BaseModel):
     kafka: bool
     sessions: int
     uploads_dir: str
+
+
+class RecordingInfo(BaseModel):
+    """Итоговая запись сессии; status: recording, rendering, ready или failed."""
+    session_id: str
+    name: Optional[str] = None
+    kind: Optional[str] = None
+    status: str
+    frames: Optional[int] = None
+    duration_sec: Optional[float] = None
+    size_bytes: Optional[int] = None
+    has_audio: Optional[bool] = None
+    truncated: bool = False
+    summary: Optional[Dict[str, Any]] = None
+    error: Optional[str] = None
+    started_at: Optional[str] = None
+    finished_at: Optional[str] = None

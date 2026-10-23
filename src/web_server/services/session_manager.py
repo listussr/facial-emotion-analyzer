@@ -9,12 +9,14 @@ import uuid
 from dataclasses import dataclass
 from dataclasses import field
 from datetime import datetime
+from datetime import timezone
 from pathlib import Path
 from typing import Dict
 from typing import List
 from typing import Optional
 from typing import Union
 
+from src.db_managing.schema import upsert_recording_sql
 from src.session_config import AudioSettings
 from src.session_config import FusionSettings
 from src.session_config import SessionConfig as ProcessingConfig
@@ -23,10 +25,13 @@ from src.session_config import VisionSettings
 from src.session_config import next_revision
 from src.video_producing import CameraConfig
 from src.video_producing import CameraProducer
+from src.video_producing.sources import browser_source
 from ..config import settings
 from ..schemas import SessionConfig
 from ..schemas import SessionInfo
 from ..schemas import SessionKind
+from .db import get_cursor
+from .media_probe import MediaProbe
 from .media_probe import check_modalities
 from .media_probe import probe_source
 
@@ -163,6 +168,33 @@ class SessionManager:
         camera_id = f"cam_{uuid.uuid4().hex[:6]}"
         return self._spawn(camera_id, "camera", name, source, frame_rate, config)
 
+    def create_browser(self, name: str, frame_rate: int, config: SessionConfig) -> SessionInfo:
+        """
+        Сессия с камерой и микрофоном браузера; медиа приходит по WebSocket /api/capture/{id}.
+
+        Args:
+            name       (str)          : Имя сессии.
+            frame_rate (int)          : Частота кадров продюсера.
+            config     (SessionConfig): Параметры обработки; modalities — что отдаёт браузер.
+
+        Returns:
+            SessionInfo: Созданная сессия.
+        """
+        camera_id = f"browser_{uuid.uuid4().hex[:6]}"
+        defaults  = CameraConfig(camera_id=camera_id, source="", kafka_servers="")
+        source    = browser_source.BrowserSource(
+            camera_id, has_video="video" in config.modalities, has_audio="audio" in config.modalities,
+            sample_rate=defaults.audio_sample_rate, channels=defaults.audio_channels,
+            samples_per_chunk=defaults.audio_samples_per_chunk,
+        )
+        uri   = browser_source.register(source)
+        probe = MediaProbe(has_video=source.has_video, has_audio=source.has_audio)
+        try:
+            return self._spawn(camera_id, "camera", name, uri, frame_rate, config, probe=probe)
+        except Exception:
+            browser_source.unregister(camera_id)
+            raise
+
     def create_upload(
         self,
         name: str,
@@ -188,13 +220,14 @@ class SessionManager:
         source: Union[str, int],
         frame_rate: int,
         config: SessionConfig,
+        probe: Optional[MediaProbe] = None,
     ) -> SessionInfo:
         """
         Запуск сессии: проверка модальностей источника, публикация конфига, старт продюсера.
 
         Конфиг публикуется до первого кадра: консьюмеры читают настройки из session-config.
         """
-        probe = probe_source(source)
+        probe = probe or probe_source(source)
         check_modalities(probe, config.modalities)
 
         self._config_publisher().publish(build_processing_config(camera_id, config))
@@ -239,7 +272,17 @@ class SessionManager:
         with self._lock:
             self._sessions[camera_id] = sess
         self._log.info(f"Session started: {camera_id} ({kind}, {name})")
+        self._register_recording(camera_id, kind, name)
         return sess.info()
+
+    def _register_recording(self, camera_id: str, kind: SessionKind, name: str) -> None:
+        """Имя и тип сессии для списка записей; статус записи ведёт сервис архивации."""
+        try:
+            with get_cursor() as cur:
+                cur.execute(upsert_recording_sql(("name", "kind", "started_at")),
+                            (camera_id, name, kind, datetime.now(timezone.utc)))
+        except Exception as e:
+            self._log.warning(f"Recording entry for {camera_id} not saved: {e}")
 
     def list(self, kind: Optional[SessionKind] = None) -> List[SessionInfo]:
         with self._lock:
@@ -252,6 +295,26 @@ class SessionManager:
         with self._lock:
             sess = self._sessions.get(session_id)
         return sess.info() if sess else None
+
+    def running_session_for(self, path: Path) -> Optional[str]:
+        """
+        Сессия, которая сейчас читает файл.
+
+        Args:
+            path (Path): Путь к загруженному файлу.
+
+        Returns:
+            Optional[str]: Идентификатор сессии или None.
+        """
+        target = str(path.resolve())
+        with self._lock:
+            sessions = list(self._sessions.values())
+        for sess in sessions:
+            if sess.kind != "upload" or str(Path(sess.source).resolve()) != target:
+                continue
+            if sess.info().status == "running":
+                return sess.id
+        return None
 
     def detach(self, session_id: str) -> Optional[CameraProducer]:
         """Сессия снимается из реестра без остановки продюсера: её делает вызывающий код в фоне."""
@@ -274,6 +337,9 @@ class SessionManager:
 
         Конфиг удаляется после stream_end, чтобы консьюмеры дообработали последние кадры с настройками сессии.
         """
+        browser = browser_source.unregister(log_id) if log_id else None
+        if browser is not None:
+            browser.finish()
         try:
             producer.stop()
             self._log.info(f"Producer stopped: {log_id}")

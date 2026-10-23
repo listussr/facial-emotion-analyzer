@@ -9,16 +9,20 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 
-# Тяжёлые артефакты, не нужные в Docker-образе
+# Тяжёлые артефакты, не нужные в Docker-образе (модели монтируются томом)
 data/
+models/
+*.zip
 scripts/bench_results/
 *.log
 project.log
 
-# Фронт билдится внутри своего Dockerfile — node_modules в контекст не тащим
-frontend/node_modules/
-frontend/dist/
-frontend/.vite/
+# Фронт собирается своим Dockerfile, тесты и старый стек Kafka в образе не нужны
+frontend/
+tests/
+kafka_server/
+src/frames_processing/processing/emotion_recognition/models/
+src/test_videos/
 
 # Git и IDE
 .git/
