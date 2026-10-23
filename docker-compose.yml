@@ -1,0 +1,298 @@
+# Полный стек Affectra: kafka · postgres · s3 (SeaweedFS) · consumer · audio-consumer · fusion · visualizer · archiver
+# · webapp · frontend
+#
+#   docker compose up -d --build
+#
+# UI http://localhost:8080 · API http://localhost:8000/docs · Kafka UI http://localhost:7000
+# S3 http://localhost:8333 · Postgres localhost:5433 · Kafka localhost:9092
+#
+# Модели CREMA-D должны лежать в ./models/crema (распакованный crema_emotion_models.zip).
+
+x-python-env: &python-env
+  KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+  TOPIC_SESSION_EVENTS:    session-events
+  TOPIC_SESSION_CONFIG:    session-config
+  OPENCV_NUM_THREADS:      "1"
+
+x-db-env: &db-env
+  DB_HOST:     postgres
+  DB_PORT:     "5432"
+  DB_NAME:     ${DB_NAME:-emotions}
+  DB_USER:     ${DB_USER:-app_user}
+  DB_PASSWORD: ${DB_PASSWORD:-basic_app_password}
+
+x-after-topics: &after-topics
+  topics-init:
+    condition: service_completed_successfully
+
+x-s3-env: &s3-env
+  S3_ENDPOINT:   http://s3:8333
+  S3_ACCESS_KEY: ${S3_ACCESS_KEY:-affectra}
+  S3_SECRET_KEY: ${S3_SECRET_KEY:-affectra-secret}
+  S3_BUCKET:     ${S3_BUCKET:-affectra-recordings}
+
+x-models: &models
+  - ./models/crema:/app/models/crema:ro
+
+services:
+
+  zookeeper:
+    image: zookeeper:3.8
+    container_name: affectra-zookeeper
+    restart: unless-stopped
+
+  kafka:
+    image: confluentinc/cp-kafka:7.4.0
+    container_name: affectra-kafka
+    depends_on: [zookeeper]
+    restart: unless-stopped
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT_INTERNAL:PLAINTEXT,PLAINTEXT_EXTERNAL:PLAINTEXT
+      KAFKA_LISTENERS: PLAINTEXT_INTERNAL://0.0.0.0:29092,PLAINTEXT_EXTERNAL://0.0.0.0:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT_INTERNAL://kafka:29092,PLAINTEXT_EXTERNAL://localhost:9092
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT_INTERNAL
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_MESSAGE_MAX_BYTES: 10485760
+      KAFKA_REPLICA_FETCH_MAX_BYTES: 10485760
+      # Топики создаёт topics-init: автосоздание дало бы session-config без compaction
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+    healthcheck:
+      test: ["CMD", "kafka-topics", "--bootstrap-server", "localhost:29092", "--list"]
+      interval: 5s
+      timeout: 10s
+      retries: 30
+
+  # Одинаковое число партиций во всех топиках: потоки камеры с ключом camera_id попадают в партиции с одним номером
+  topics-init:
+    image: confluentinc/cp-kafka:7.4.0
+    container_name: affectra-topics-init
+    depends_on:
+      kafka:
+        condition: service_healthy
+    restart: "no"
+    environment:
+      PARTITIONS: ${TOPIC_PARTITIONS:-1}
+    entrypoint: ["bash", "-c"]
+    command:
+      - |
+        set -e
+        B=kafka:29092
+        create() { kafka-topics --bootstrap-server $$B --create --if-not-exists --topic "$$1" --partitions "$$PARTITIONS" --replication-factor 1 $${2:+--config} $${2:-} $${3:+--config} $${3:-} $${4:+--config} $${4:-}; }
+        create raw-video-frames retention.ms=1800000
+        create raw-audio-chunks retention.ms=1800000
+        create annotated-video  retention.ms=1800000
+        create session-events
+        create vision-analytics
+        create audio-analytics
+        create fused-analytics
+        create session-config cleanup.policy=compact segment.ms=3600000 min.cleanable.dirty.ratio=0.1
+        kafka-topics --bootstrap-server $$B --list
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: affectra-kafka-ui
+    depends_on: [kafka]
+    restart: unless-stopped
+    ports:
+      - "7000:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
+
+  postgres:
+    build: ./faces_emotions_database
+    container_name: affectra-postgres
+    restart: unless-stopped
+    ports:
+      - "5433:5432"
+    environment:
+      POSTGRES_DB: ${DB_NAME:-emotions}
+      POSTGRES_USER: ${DB_USER:-app_user}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-basic_app_password}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  # Хранилище итоговых записей сессий: SeaweedFS с S3 API (образы MinIO больше не публикуются)
+  s3:
+    image: chrislusf/seaweedfs:4.48
+    container_name: affectra-s3
+    restart: unless-stopped
+    command: ["server", "-dir=/data", "-s3", "-s3.port=8333"]
+    ports:
+      - "8333:8333"
+    environment:
+      AWS_ACCESS_KEY_ID:     ${S3_ACCESS_KEY:-affectra}
+      AWS_SECRET_ACCESS_KEY: ${S3_SECRET_KEY:-affectra-secret}
+    volumes:
+      - s3_data:/data
+
+  # Лица → эмоции лица (vision-analytics), таймсерии лиц в БД
+  consumer:
+    build:
+      context: .
+      dockerfile: Dockerfile.python
+    image: affectra-python:latest
+    container_name: affectra-consumer
+    depends_on:
+      <<: *after-topics
+      postgres:
+        condition: service_started
+    restart: unless-stopped
+    command: ["python", "consumer.py"]
+    volumes: *models
+    environment:
+      <<: [*python-env, *db-env]
+      TOPIC_RAW:              raw-video-frames
+      TOPIC_ANALYTICS:        vision-analytics
+      EMOTION_MODEL_DEFAULT:  ${EMOTION_MODEL_DEFAULT:-crema-swin-int8}
+      EMOTION_DEVICE_DEFAULT: cpu
+      EMOTION_NUM_THREADS:    ${EMOTION_NUM_THREADS:-2}
+      DETECTOR_BACKEND:       ${DETECTOR_BACKEND:-yunet}
+      DETECTOR_MIN_CONF:      ${DETECTOR_MIN_CONF:-0.6}
+      DETECTOR_MAX_SIDE:      ${DETECTOR_MAX_SIDE:-480}
+      DETECTION_FREQUENCY:    ${DETECTION_FREQUENCY:-2}
+      CLIP_FRAMES:            ${CLIP_FRAMES:-8}
+      EMOTION_HOP_MS:         ${EMOTION_HOP_MS:-1000}
+      TRACKER_DEFAULT:        ${TRACKER_DEFAULT:-bytetrack}
+      IDENTIFICATION_ENABLED: ${IDENTIFICATION_ENABLED:-true}
+      MAX_FRAME_AGE_MS:       ${MAX_FRAME_AGE_MS:-1000}
+
+  # Голос: VAD и эмоции по окнам (audio-analytics)
+  audio-consumer:
+    image: affectra-python:latest
+    container_name: affectra-audio-consumer
+    depends_on:
+      <<: *after-topics
+      consumer:
+        condition: service_started
+    restart: unless-stopped
+    command: ["python", "audio_consumer.py"]
+    volumes: *models
+    environment:
+      <<: *python-env
+      TOPIC_AUDIO_RAW:       raw-audio-chunks
+      TOPIC_AUDIO_ANALYTICS: audio-analytics
+      VOICE_MODEL_DEFAULT:   ${VOICE_MODEL_DEFAULT:-crema-wavlm-int8}
+      VOICE_DEVICE_DEFAULT:  cpu
+      VOICE_NUM_THREADS:     ${VOICE_NUM_THREADS:-2}
+      AUDIO_WINDOW_MS:       ${AUDIO_WINDOW_MS:-3000}
+      AUDIO_HOP_MS:          ${AUDIO_HOP_MS:-1000}
+      VAD_THRESHOLD:         ${VAD_THRESHOLD:-0.3}
+      MAX_CHUNK_AGE_MS:      ${MAX_CHUNK_AGE_MS:-2000}
+
+  # Слияние лица и голоса (fused-analytics), слитые таймсерии и голос сессий в БД
+  fusion:
+    image: affectra-python:latest
+    container_name: affectra-fusion
+    depends_on:
+      <<: *after-topics
+      consumer:
+        condition: service_started
+      postgres:
+        condition: service_started
+    restart: unless-stopped
+    command: ["python", "fusion_consumer.py"]
+    volumes: *models
+    environment:
+      <<: [*python-env, *db-env]
+      TOPIC_ANALYTICS:         vision-analytics
+      TOPIC_AUDIO_ANALYTICS:   audio-analytics
+      TOPIC_FUSED:             fused-analytics
+      FUSION_METHOD:           ${FUSION_METHOD:-stack_hidden}
+      FUSION_VOICE_MAX_AGE_MS: ${FUSION_VOICE_MAX_AGE_MS:-3000}
+      FUSION_MIN_OVERLAP_MS:   ${FUSION_MIN_OVERLAP_MS:-1000}
+      FUSION_DB_ENABLED:       ${FUSION_DB_ENABLED:-true}
+
+  # Серверная аннотация в фоне (annotated-video); в браузере рамки рисуются поверх /api/live
+  visualizer:
+    image: affectra-python:latest
+    container_name: affectra-visualizer
+    depends_on:
+      <<: *after-topics
+      consumer:
+        condition: service_started
+    restart: unless-stopped
+    command: ["python", "visualizer.py"]
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      OPENCV_NUM_THREADS:      "1"
+      TOPIC_RAW:               raw-video-frames
+      TOPIC_ANALYTICS:         fused-analytics
+      TOPIC_ANNOTATED:         annotated-video
+
+  # Итоговая запись после сессии: видео с рамками слитых эмоций и звуком, аналитика JSON -> S3
+  archiver:
+    image: affectra-python:latest
+    container_name: affectra-archiver
+    depends_on:
+      <<: *after-topics
+      consumer:
+        condition: service_started
+      postgres:
+        condition: service_started
+      s3:
+        condition: service_started
+    restart: unless-stopped
+    command: ["python", "archiver.py"]
+    environment:
+      <<: [*python-env, *db-env, *s3-env]
+      TOPIC_RAW:                 raw-video-frames
+      TOPIC_AUDIO_RAW:           raw-audio-chunks
+      TOPIC_FUSED:               fused-analytics
+      ARCHIVE_SPOOL_DIR:         /app/data/archive_spool
+      ARCHIVE_ANALYTICS_GRACE_S: ${ARCHIVE_ANALYTICS_GRACE_S:-15}
+      ARCHIVE_MAX_DURATION_S:    ${ARCHIVE_MAX_DURATION_S:-1800}
+      ARCHIVE_RENDER_THREADS:    ${ARCHIVE_RENDER_THREADS:-2}
+    volumes:
+      - archive_spool:/app/data/archive_spool
+
+  webapp:
+    image: affectra-python:latest
+    container_name: affectra-webapp
+    depends_on:
+      <<: *after-topics
+      consumer:
+        condition: service_started
+      postgres:
+        condition: service_started
+    restart: unless-stopped
+    command: ["python", "webapp.py"]
+    ports:
+      - "8000:8000"
+    environment:
+      <<: *s3-env
+      OPENCV_NUM_THREADS:            "1"
+      AFFECTRA_KAFKA:                kafka:29092
+      AFFECTRA_TOPIC_RAW:            raw-video-frames
+      AFFECTRA_TOPIC_AUDIO_RAW:      raw-audio-chunks
+      AFFECTRA_TOPIC_SESSION_EVENTS: session-events
+      AFFECTRA_TOPIC_SESSION_CONFIG: session-config
+      AFFECTRA_TOPIC_ANALYTICS:      fused-analytics
+      AFFECTRA_TOPIC_ANNOTATED:      annotated-video
+      AFFECTRA_DB_HOST:              postgres
+      AFFECTRA_DB_PORT:              "5432"
+      AFFECTRA_DB_NAME:              ${DB_NAME:-emotions}
+      AFFECTRA_DB_USER:              ${DB_USER:-app_user}
+      AFFECTRA_DB_PASSWORD:          ${DB_PASSWORD:-basic_app_password}
+    volumes:
+      - ./models/crema:/app/models/crema:ro
+      - uploads:/app/data/uploads
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: affectra-frontend
+    depends_on: [webapp]
+    restart: unless-stopped
+    ports:
+      - "8080:80"
+
+volumes:
+  postgres_data:
+  uploads:
+  s3_data:
+  archive_spool:

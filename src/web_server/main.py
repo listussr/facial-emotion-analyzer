@@ -13,7 +13,9 @@ from .routes import sessions as sessions_routes
 from .routes import streams as streams_routes
 from .routes import uploads as uploads_routes
 from .routes import events as events_routes
+from .routes import capture as capture_routes
 from .routes import history as history_routes
+from .routes import recordings as recordings_routes
 from .schemas import HealthInfo
 from .services.session_manager import session_manager
 from .services.stream_dispatcher import live_dispatcher
@@ -64,6 +66,8 @@ app.include_router(streams_routes.router)
 app.include_router(streams_routes.live_router)
 app.include_router(events_routes.router)
 app.include_router(history_routes.router)
+app.include_router(recordings_routes.router)
+app.include_router(capture_routes.router)
 
 
 @app.get("/api/health", response_model=HealthInfo, tags=["meta"])

@@ -1,22 +1,18 @@
-import { useState } from 'react';
-
 interface Props {
-  defaultOn?: boolean;
-  onChange?: (on: boolean) => void;
+  on: boolean;
+  onChange: (on: boolean) => void;
+  label?: string;
 }
 
-export default function Toggle({ defaultOn = false, onChange }: Props) {
-  const [on, setOn] = useState(defaultOn);
+export default function Toggle({ on, onChange, label }: Props) {
   return (
     <button
       type="button"
+      role="switch"
+      aria-checked={on}
+      aria-label={label}
       className={`toggle ${on ? 'on' : ''}`}
-      aria-pressed={on}
-      onClick={() => {
-        const next = !on;
-        setOn(next);
-        onChange?.(next);
-      }}
+      onClick={() => onChange(!on)}
     />
   );
 }

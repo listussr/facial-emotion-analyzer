@@ -28,6 +28,21 @@ AUDIO_EXT   = {".wav", ".mp3", ".m4a", ".flac", ".ogg", ".aac", ".opus"}
 ALLOWED_EXT = VIDEO_EXT | AUDIO_EXT
 
 
+def _name_file(path: Path) -> Path:
+    return path.with_name(path.name + ".name")
+
+
+def _original_name(path: Path) -> str:
+    try:
+        return _name_file(path).read_text(encoding="utf-8").strip() or path.name
+    except OSError:
+        return path.name
+
+
+def _media_files(upload_id: str) -> List[Path]:
+    return [p for p in settings.UPLOADS_DIR.glob(f"{upload_id}.*") if p.suffix.lower() in ALLOWED_EXT]
+
+
 def _upload_info(path: Path, filename: str, size: int, uploaded_at) -> UploadInfo:
     has_video = has_audio = duration = None
     try:
@@ -60,7 +75,7 @@ def list_uploads():
             stat = path.stat()
         except OSError:
             continue
-        out.append(_upload_info(path, path.name, stat.st_size, stat.st_mtime))
+        out.append(_upload_info(path, _original_name(path), stat.st_size, stat.st_mtime))
     out.sort(key=lambda u: -(u.uploaded_at or 0))
     return out
 
@@ -106,6 +121,10 @@ async def upload_file(file: UploadFile = File(...)):
         mtime = target.stat().st_mtime
     except OSError:
         mtime = None
+    try:
+        _name_file(target).write_text(Path(file.filename).name, encoding="utf-8")
+    except OSError as e:
+        log.warning(f"Cannot save original name of {target.name}: {e}")
     info = _upload_info(target, file.filename, size, mtime)
     if not info.has_video and not info.has_audio:
         target.unlink(missing_ok=True)
@@ -115,7 +134,7 @@ async def upload_file(file: UploadFile = File(...)):
 
 @router.post("/session", response_model=SessionInfo)
 def start_upload_session(req: CreateUploadRequest):
-    candidates = list(settings.UPLOADS_DIR.glob(f"{req.upload_id}.*"))
+    candidates = _media_files(req.upload_id)
     if not candidates:
         raise HTTPException(status_code=404, detail="Upload not found")
     upload_path = candidates[0]
@@ -136,5 +155,13 @@ def delete_upload(upload_id: str):
     if not candidates:
         raise HTTPException(status_code=404, detail="Upload not found")
     for p in candidates:
-        p.unlink(missing_ok=True)
+        session_id = session_manager.running_session_for(p)
+        if session_id is not None:
+            raise HTTPException(status_code=409, detail=f"Файл обрабатывается сессией {session_id} — сначала остановите её")
+    for p in candidates:
+        try:
+            p.unlink(missing_ok=True)
+        except OSError as e:
+            log.warning(f"Cannot delete {p.name}: {e}")
+            raise HTTPException(status_code=409, detail="Файл занят другим процессом — попробуйте позже")
     return {"ok": True, "deleted": upload_id}

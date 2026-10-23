@@ -4,6 +4,7 @@ from typing import Optional
 from typing import TYPE_CHECKING
 from typing import Union
 
+from . import browser_source
 from .base import MediaSource
 from .live_source import LiveSource
 from .file_source import FileSource
@@ -27,16 +28,25 @@ def open_source(config: "CameraConfig") -> MediaSource:
     Выбор источника по конфигу.
 
     Индекс камеры — LiveSource с вебкамерой, "mic" — LiveSource только с микрофоном,
-    остальное (файл, rtsp://, http://) — FileSource.
+    "browser:<id>" — зарегистрированный BrowserSource, остальное (файл, rtsp://, http://) — FileSource.
 
     Args:
         config (CameraConfig): Конфиг продюсера.
+
+    Raises:
+        RuntimeError: Источник браузера не зарегистрирован.
 
     Returns:
         MediaSource: Неоткрытый источник.
     """
     source       = config.source
     camera_index = _as_camera_index(source)
+
+    if isinstance(source, str) and source.startswith(browser_source.BROWSER_PREFIX):
+        found = browser_source.get(source[len(browser_source.BROWSER_PREFIX):])
+        if found is None:
+            raise RuntimeError(f"Browser source {source!r} is not registered")
+        return found
 
     if camera_index is not None or source == MIC_ONLY_SOURCE:
         return LiveSource(

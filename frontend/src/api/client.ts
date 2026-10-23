@@ -18,6 +18,7 @@ import {
   SessionHistoryDetail,
   SearchMatch,
   VoiceHistory,
+  RecordingInfo,
 } from '@/types';
 
 /** Настройки обработки сессии — уходят в топик session-config до старта продюсера. */
@@ -121,6 +122,17 @@ function dtoToSource(dto: SessionInfoDTO): StreamSource {
   } as UploadSource;
 }
 
+async function errorDetail(r: Response): Promise<string> {
+  const text = await r.text().catch(() => '');
+  try {
+    const detail = JSON.parse(text)?.detail;
+    if (typeof detail === 'string') return detail;
+  } catch {
+    /* не JSON */
+  }
+  return text || `${r.status} ${r.statusText}`;
+}
+
 async function jsonFetch<T>(url: string, init?: RequestInit, timeoutMs = 8000): Promise<T> {
   const ctrl = new AbortController();
   const t = window.setTimeout(() => ctrl.abort(), timeoutMs);
@@ -171,6 +183,19 @@ export const api = {
     return dtoToSource(dto);
   },
 
+  async createBrowserSession(payload: {
+    name: string;
+    frame_rate: number;
+    config: SessionConfigDTO;
+  }): Promise<StreamSource> {
+    const dto = await jsonFetch<SessionInfoDTO>(
+      '/api/sessions/browser',
+      { method: 'POST', body: JSON.stringify(payload) },
+      20000
+    );
+    return dtoToSource(dto);
+  },
+
   async stopSession(id: string): Promise<void> {
     const r = await fetch(`/api/sessions/${id}`, { method: 'DELETE' });
     if (!r.ok) throw new Error(`Failed to stop ${id}`);
@@ -187,7 +212,7 @@ export const api = {
     const fd = new FormData();
     fd.append('file', file);
     const r = await fetch('/api/uploads', { method: 'POST', body: fd });
-    if (!r.ok) throw new Error(await r.text());
+    if (!r.ok) throw new Error(await errorDetail(r));
     return r.json();
   },
 
@@ -197,7 +222,7 @@ export const api = {
 
   async deleteUpload(uploadId: string): Promise<void> {
     const r = await fetch(`/api/uploads/${uploadId}`, { method: 'DELETE' });
-    if (!r.ok) throw new Error(await r.text());
+    if (!r.ok) throw new Error(await errorDetail(r));
   },
 
   async startUploadSession(payload: {
@@ -273,5 +298,31 @@ export const api = {
 
   sessionExportCsvUrl(sessionId: string, modality?: HistoryModality): string {
     return withModality(`/api/history/sessions/${sessionId}/export.csv`, modality);
+  },
+
+  // ---------- recordings ----------
+
+  async listRecordings(): Promise<RecordingInfo[]> {
+    return jsonFetch<RecordingInfo[]>('/api/recordings');
+  },
+
+  async getRecording(sessionId: string): Promise<RecordingInfo | null> {
+    const r = await fetch(`/api/recordings/${sessionId}`);
+    if (r.status === 404) return null;
+    if (!r.ok) throw new Error(await errorDetail(r));
+    return r.json();
+  },
+
+  async deleteRecording(sessionId: string): Promise<void> {
+    const r = await fetch(`/api/recordings/${sessionId}`, { method: 'DELETE' });
+    if (!r.ok) throw new Error(await errorDetail(r));
+  },
+
+  recordingVideoUrl(sessionId: string, download = false): string {
+    return `/api/recordings/${sessionId}/video${download ? '?download=true' : ''}`;
+  },
+
+  recordingAnalyticsUrl(sessionId: string): string {
+    return `/api/recordings/${sessionId}/analytics?download=true`;
   },
 };

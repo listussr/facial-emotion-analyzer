@@ -215,3 +215,4 @@ __marimo__/
 models/crema/*.npz
 models/crema/*.pt
 crema_emotion_models.zip
+data/

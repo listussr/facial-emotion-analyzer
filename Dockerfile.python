@@ -1,0 +1,43 @@
+# Общий образ consumer.py / audio_consumer.py / fusion_consumer.py / visualizer.py / archiver.py / webapp.py.
+# Модели CREMA-D не входят в образ: каталог models/crema монтируется томом (см. docker-compose.yml).
+
+FROM python:3.12-slim-bookworm
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    CREMA_MODELS_DIR=/app/models/crema \
+    OPENCV_NUM_THREADS=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        librdkafka1 \
+        libgl1 \
+        libglib2.0-0 \
+        libgomp1 \
+        libsndfile1 \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# CPU-сборка torch: колесо с PyPI тянет CUDA (~2.5 ГБ), которая в контейнере не используется
+RUN pip install torch==2.2.2 torchvision==0.17.2 --index-url https://download.pytorch.org/whl/cpu
+
+# requirements.txt собран под Windows (UTF-16): убираем GPU-рантайм, неиспользуемые и Windows-only пакеты
+COPY requirements.txt /tmp/requirements.txt
+RUN python -c "import re; b = open('/tmp/requirements.txt', 'rb').read(); \
+t = b.decode('utf-16' if b[:2] in (b'\xff\xfe', b'\xfe\xff') else 'utf-8-sig'); \
+skip = re.compile(r'^(torch|torchvision|onnxruntime-gpu|insightface|psycopg2|pyreadline3|redis|pika|kafka-python)==', re.I); \
+open('/tmp/req.txt', 'w').write('\n'.join(l for l in t.splitlines() if l.strip() and not skip.match(l)))" \
+ && pip install -r /tmp/req.txt "onnxruntime==1.23.2" "fastapi>=0.115" "uvicorn[standard]>=0.30" "python-multipart>=0.0.9" \
+ && rm /tmp/requirements.txt /tmp/req.txt
+
+# Веса FaceNet (идентификация) скачиваются при сборке, а не при первом запуске сервиса
+RUN python -c "from facenet_pytorch import InceptionResnetV1; InceptionResnetV1(pretrained='vggface2')"
+
+COPY src/ /app/src/
+COPY consumer.py audio_consumer.py fusion_consumer.py visualizer.py archiver.py webapp.py producer.py /app/
+COPY scripts/ /app/scripts/
+
+CMD ["python", "webapp.py"]

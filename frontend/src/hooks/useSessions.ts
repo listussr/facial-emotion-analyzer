@@ -9,10 +9,10 @@ interface State {
 }
 
 /**
- * Поллинг списка сессий заданного типа. Возвращает данные + функции
+ * Поллинг списка сессий (всех или заданного типа). Возвращает данные + функции
  * для ручного обновления и остановки сессии.
  */
-export function useSessions(kind: 'camera' | 'upload', intervalMs = 2500) {
+export function useSessions(kind?: 'camera' | 'upload', intervalMs = 2500) {
   const [state, setState] = useState<State>({ sessions: [], loading: true, error: null });
   const stopped = useRef(false);
 

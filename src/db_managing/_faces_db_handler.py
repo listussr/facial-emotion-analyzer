@@ -16,6 +16,7 @@ from ._abstract_handler import AbstractDBHandler
 from .schema import MODALITIES
 from .schema import ensure_schema
 from .schema import label_set_of
+from .schema import upsert_recording_sql
 
 
 class FacesDBHandler(AbstractDBHandler):
@@ -136,6 +137,20 @@ class FacesDBHandler(AbstractDBHandler):
             (camera_id, label_set_of(payload), json.dumps(payload, ensure_ascii=False)),
             f"voice timeseries for session {camera_id}: {len(payload.get('windows', []))} windows",
         )
+
+    def upsert_recording(self, camera_id: str, **fields: Any) -> None:
+        """
+        Вставка или обновление записи сессии; не переданные поля не меняются.
+
+        Args:
+            camera_id (str): Идентификатор сессии.
+            fields    (Any): Поля session_recordings; summary сериализуется в JSON.
+        """
+        if "summary" in fields and fields["summary"] is not None:
+            fields["summary"] = json.dumps(fields["summary"], ensure_ascii=False)
+        names = list(fields)
+        self._execute_insert(upsert_recording_sql(names), (camera_id, *[fields[n] for n in names]),
+                             f"recording {camera_id}: {fields.get('status')}")
 
     def _execute_insert(self, query: str, params: tuple, what: str) -> None:
         try:

@@ -179,3 +179,27 @@ export interface VoiceHistory {
     scores?: number[] | null;
   }[];
 }
+
+export type RecordingStatus = 'recording' | 'rendering' | 'ready' | 'failed';
+
+/** Итоговая запись сессии в хранилище: видео с аннотациями и аналитика JSON. */
+export interface RecordingInfo {
+  session_id: string;
+  name?: string | null;
+  kind?: 'camera' | 'upload' | null;
+  status: RecordingStatus;
+  frames?: number | null;
+  duration_sec?: number | null;
+  size_bytes?: number | null;
+  has_audio?: boolean | null;
+  truncated: boolean;
+  summary?: {
+    fused_label_counts?: Record<string, number>;
+    face_label_counts?: Record<string, number>;
+    voice_label_counts?: Record<string, number>;
+    tracks?: Record<string, { label_counts: Record<string, number>; dominant: Emotion }>;
+  } | null;
+  error?: string | null;
+  started_at?: string | null;
+  finished_at?: string | null;
+}
