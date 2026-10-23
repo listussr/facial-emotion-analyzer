@@ -15,6 +15,7 @@ from fastapi.responses import StreamingResponse
 
 from ..schemas import RecordingInfo
 from ..services.db import get_cursor
+from ..services.recordings import delete_recording_data
 from ..services.recordings import storage
 
 router = APIRouter(prefix="/api/recordings", tags=["recordings"])
@@ -102,10 +103,8 @@ def delete_recording(session_id: str):
     if row["status"] in ("recording", "rendering"):
         raise HTTPException(status_code=409, detail="Запись ещё создаётся — удалите её после завершения")
     try:
-        deleted = storage().delete_prefix(f"sessions/{session_id}/")
+        deleted = delete_recording_data(session_id)
     except Exception as e:
         log.warning(f"Cannot delete objects of {session_id}: {e}")
         raise HTTPException(status_code=502, detail="Хранилище записей недоступно")
-    with get_cursor() as cur:
-        cur.execute("DELETE FROM session_recordings WHERE camera_id = %s", (session_id,))
     return {"ok": True, "deleted": session_id, "objects": deleted}

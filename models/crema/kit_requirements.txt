@@ -1,0 +1,14 @@
+# обязательные (ONNX-бэкенд, CPU)
+numpy>=1.24
+onnxruntime>=1.17
+opencv-python>=4.8        # cv2.FaceDetectorYN (YuNet), чтение видео
+librosa>=0.10             # чтение/ресемплинг звука, обрезка тишины
+soundfile>=0.12
+
+# только для PyTorch-бэкенда (исходный формат весов); CPU-сборки достаточно
+# pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+# torch>=2.1
+# torchvision>=0.16
+# transformers>=4.40
+
+# звук из видеофайлов (.mp4/.flv) librosa читает через ffmpeg — он должен быть в PATH

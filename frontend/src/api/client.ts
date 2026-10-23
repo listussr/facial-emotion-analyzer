@@ -57,6 +57,18 @@ interface SessionInfoDTO {
   audio_seconds_sent?: number;
 }
 
+/** Объём данных одного вида; retention_days — срок автоочистки, 0 — хранятся всегда. */
+export interface StorageUsage {
+  count: number;
+  size_bytes: number;
+  retention_days: number;
+}
+
+export interface StorageInfo {
+  recordings: StorageUsage;
+  uploads: StorageUsage;
+}
+
 export interface UploadEntry {
   upload_id: string;
   filename: string;
@@ -324,5 +336,11 @@ export const api = {
 
   recordingAnalyticsUrl(sessionId: string): string {
     return `/api/recordings/${sessionId}/analytics?download=true`;
+  },
+
+  // ---------- storage ----------
+
+  async storageInfo(): Promise<StorageInfo> {
+    return jsonFetch<StorageInfo>('/api/storage');
   },
 };

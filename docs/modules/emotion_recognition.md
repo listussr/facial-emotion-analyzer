@@ -1,198 +1,90 @@
-# `emotion_recognition` — распознавание эмоций
+# `emotion_recognition` — эмоции по лицу
 
-Четвёртая стадия: по кропу лица получить распределение вероятностей по
-восьми классам и сгладить его во времени, чтобы лента эмоций не «дёргалась».
+Оценить эмоцию человека по окну кадров его трека. Модель CREMA-D обучена на клипах 3 с, поэтому оценка
+идёт не по одному кадру, а по 8 или 16 кадрам за последние 3 секунды.
 
 ```
 src/frames_processing/processing/emotion_recognition/
-├── __init__.py             — экспорт EmotionRecognizer, get_emotion_smoothing_strategy
-├── emotion_recognizer.py   — фабрика + CPU (ONNX) и CUDA (PyTorch) реализации
-├── pipeline_utils.py       — метки классов и стратегии сглаживания
-├── _custom_models.py       — классы моделей для unpickle .pth
-└── models/                 — веса: *.onnx, *.int8.onnx, *.pth
+├── clip_model.py          ClipEmotionModel, CremaClipModel, StubClipModel, load_clip_model
+├── clip_window.py         ClipConfig, TrackClip, BoxStabilizer, crop_face, WindowSmoother, frame_times
+├── emotion_recognizer.py  EmotionRecognizer — старые покадровые модели (8 классов), не используется пайплайном
+└── pipeline_utils.py      стратегии сглаживания старых моделей
 ```
 
-Классы (порядок фиксирован во всём проекте):
-
-```
-0 anger · 1 contempt · 2 disgust · 3 fear · 4 happy · 5 neutral · 6 sad · 7 surprise
-```
+Классы — 6 эмоций CREMA-D из `src/emotion_labels.py`: `anger, disgust, fear, happy, neutral, sad`.
 
 ---
 
-## `EmotionRecognizer` — фабрика ([emotion_recognizer.py](../../src/frames_processing/processing/emotion_recognition/emotion_recognizer.py))
-
-```python
-recognizer = EmotionRecognizer(model='resnet-18', device='cpu', num_threads=4)
-probs = recognizer.predict([crop1, crop2])   # np.ndarray формы (N, 8)
-```
-
-Это класс с переопределённым `__new__`: он **не возвращает свой экземпляр**,
-а отдаёт `_RecognizerCPU` или `_RecognizerCuda`. Поэтому `isinstance(x,
-EmotionRecognizer)` всегда `False` — проверяйте `_Recognizer`.
-
-### Доступные модели
-
-| Имя модели | CPU (`.onnx`) | CPU INT8 | CUDA (`.pth`) | Вход |
-|---|:---:|:---:|:---:|---|
-| `resnet-18` | ✅ | ✅ | ✅ | 224 |
-| `resnet-50` | ✅ | ✅ | ✅ | 224 |
-| `convnext` | ✅ | ✅ | ✅ | 224 |
-| `convnext-gelu` | ✅ | — | ✅ | 224 |
-| `efficientnet-b3` | ✅ | ✅ | ✅ | 300 |
-| `swin-tiny` | ✅ | ✅ | ✅ | 224 |
-
-INT8-варианты выбираются суффиксом: `resnet-18-int8`. Для `device='cuda'`
-суффикс не поддерживается — есть только FP32 `.pth`.
-
-Неизвестная пара «модель + устройство» → `ValueError` со списком доступных
-имён для этого устройства.
+## Модель по окну
 
 ```mermaid
-classDiagram
-    class _Recognizer {
-        <<abstract>>
-        +predict(images) ndarray
-    }
-    class _RecognizerCPU {
-        -_session : ort.InferenceSession
-        -_input_h, _input_w
-        +predict(images)
-    }
-    class _RecognizerCuda {
-        -model : nn.Module
-        -_transform : transforms.Compose
-        +predict(images)
-    }
-    class EmotionRecognizer {
-        <<factory>>
-        +__new__(model, device, num_threads)
-    }
-    _Recognizer <|-- _RecognizerCPU
-    _Recognizer <|-- _RecognizerCuda
-    EmotionRecognizer ..> _RecognizerCPU : creates
-    EmotionRecognizer ..> _RecognizerCuda : creates
+flowchart LR
+    C["кропы лица\n224×224 RGB"] --> E["encode()\nSwin-T, батч"]
+    E --> F["признаки кадров\n768 чисел"]
+    F --> W["окно трека\n8 или 16 признаков + времена"]
+    W --> P["predict()\nвременной трансформер"]
+    P --> O["logits · probs · emb (256)"]
 ```
 
----
+Контракт `ClipEmotionModel`:
 
-## `_RecognizerCPU` — ONNX Runtime
-
-Препроцессинг вручную на NumPy/OpenCV (быстрее, чем torchvision):
-`BGR → RGB` → `resize` под вход модели → `/255` → нормализация
-ImageNet (`mean=[0.485,0.456,0.406]`, `std=[0.229,0.224,0.225]`) →
-транспонирование в `CHW`. Softmax считается тоже вручную, с вычитанием
-максимума для численной устойчивости.
-
-Настройка сессии (`_build_cpu_session`):
-
-| Опция | Значение | Почему |
+| Метод | Вход | Выход |
 |---|---|---|
-| `graph_optimization_level` | `ORT_ENABLE_ALL` | все оффлайн-оптимизации графа |
-| `intra_op_num_threads` | `num_threads` или `os.cpu_count() - 1` | оставляем ядро продюсеру и Kafka |
-| `inter_op_num_threads` | `1` | параллелизм внутри операторов эффективнее |
-| `execution_mode` | `ORT_SEQUENTIAL` | одна модель, ветвлений в графе нет |
-| providers (FP32) | `XnnpackExecutionProvider` → `CPUExecutionProvider` | XNNPACK заметно быстрее на свёртках |
-| providers (INT8) | только `CPUExecutionProvider` | XNNPACK не поддерживает динамическую квантизацию |
+| `encode(faces_rgb)` | `(N, 224, 224, 3)` uint8 | `(N, 768)` признаки кадров |
+| `predict(feats, times)` | `(T, 768)` и времена кадров `(T,)` в секундах на шкале 0..3 | `{"logits", "probs", "emb"}` |
 
-Размер входа читается прямо из ONNX-графа
-(`session.get_inputs()[0].shape`), а не из таблицы — если в графе стоит
-динамическая ось, берётся 224.
+Кодирование и оценка окна разделены: кадр кодируется один раз, а окна идут с шагом 1 с и перекрываются.
+Так каждый кадр кодируется ровно один раз, хотя попадает в три окна.
 
----
-
-## `_RecognizerCuda` — PyTorch
-
-- Загружает **сериализованную модель целиком** (`torch.load(..., weights_only=False)`),
-  а не `state_dict`, поэтому нужны классы из `_custom_models.py`.
-- Препроцессинг — стандартный `transforms.Compose`
-  (`Resize → ToTensor → Normalize`), размер берётся из `_CUDA_INPUT_SIZE`
-  (300 для EfficientNet-B3, иначе 224).
-- Инференс под `torch.inference_mode()` + `softmax(dim=1)`.
-- Если CUDA недоступна — `RuntimeError` с подсказкой использовать `cpu`.
-
-### `_custom_models.py`
-
-`CustomEfficientNetB3` — архитектура, воспроизведённая под сохранённые
-веса (backbone заморожен, кастомная голова
-`Dropout → Linear(…,512) → ReLU → Dropout → Linear(512, 8)`).
-
-`_register_for_pickle(...)` прописывает класс в модуль `__main__`: модели
-обучались в ноутбуке, и pickle ищет класс именно там. Без этого
-`torch.load` падает с `AttributeError: Can't get attribute
-'CustomEfficientNetB3' on <module '__main__'>`.
-
----
-
-## Сглаживание ([pipeline_utils.py](../../src/frames_processing/processing/emotion_recognition/pipeline_utils.py))
-
-```python
-smooth = get_emotion_smoothing_strategy('ema_hysteresis')
-smooth(cached, probs, frequency=5, ema_coef=0.8)
-# мутирует cached: emotion_probs, emotion_label, счётчики
-```
-
-Все стратегии работают одинаково по интерфейсу: принимают словарь кэша
-трека и свежее предсказание, обновляют кэш **на месте**.
-
-| Стратегия | Функция | Поведение |
+| Имя модели | Реализация | Точность |
 |---|---|---|
-| `ema` | `exponential_smoothing` | Чистая EMA, метка = `argmax` сглаженных вероятностей |
-| `ema_voting` | `voting` | EMA + счётчик: метка меняется, когда «сырой» лидер набрал 2 голоса |
-| `ema_hysteresis` | `hysteresis_exp_smoothing` | EMA + гистерезис — **используется в пайплайне** |
+| `crema-swin-int8` (по умолчанию) | `CremaClipModel`, энкодер int8 + голова | быстрее вдвое |
+| `crema-swin` | `CremaClipModel`, fp32 | эталон, режим «Точнее» |
+| `stub` | `StubClipModel` | случайная проекция для тестов и запуска без моделей |
 
-Эффективный коэффициент — `ema_coef ** frequency`: раз инференс идёт не
-каждый кадр, вес истории корректируется на пропущенные кадры.
+`load_clip_model(model, device, num_threads)` — фабрика; инференс идёт через `emotion_kit.backends.VideoONNX`
+на ONNX Runtime CPU. Неизвестное имя — ошибка, которую пайплайн превращает в откат на модель по умолчанию.
 
-### Гистерезис подробнее
+## Окна треков ([clip_window.py](../../src/frames_processing/processing/emotion_recognition/clip_window.py))
 
-1. Обновляем `emotion_probs` по EMA.
-2. `new_label = argmax(emotion_probs)`.
-3. Если `new_label` отличается от текущей **и** уверенность «сырого»
-   предсказания `> 0.6` — увеличиваем `emotion_switch_counter`,
-   иначе уменьшаем (не ниже нуля).
-4. Смена метки происходит, только когда счётчик достиг 2.
+**`ClipConfig(n_frames=8, window_ms=3000, hop_ms=1000, min_coverage=0.6)`**
 
-Итог: одиночный выброс не переключает эмоцию, а устойчивое изменение
-подтверждается за два инференса.
+- кадр для окна берётся раз в `window_ms / n_frames` (375 мс при 8 кадрах);
+- окно не считается, пока в нём меньше `ceil(0.6 × n_frames)` кадров — первая оценка появляется через
+  2–3 с после появления лица.
 
-Первый вызов (или несовпадение размерности) инициализирует кэш «как есть»,
-без сглаживания.
+**`TrackClip`** хранит признаки кадров трека по `pts`:
 
-`idx_to_label(idx)` переводит индекс в строку и логирует ошибку при выходе
-за `[0..7]`, возвращая пустую строку.
+- `wants_frame(pts)` — нужен ли этот кадр по расписанию;
+- `mark_sampled(pts)` — сдвинуть расписание сразу при отправке кропа в энкодер. Признак может прийти позже
+  из фонового потока, а расписание уже не возьмёт лишний кадр;
+- `add(pts, feat)` — положить признак; опоздавшие и выпавшие из окна отбрасываются;
+- `window(pts)` — если пора, вернуть окно: равномерно выбранные `n_frames` признаков, времена
+  `frame_times(n)`, границы окна и число реальных кадров.
 
----
+Время назад больше чем на два окна (перемотка, новая сессия с тем же треком) сбрасывает трек.
 
-## Как добавить свою модель
+**`frame_times(n)`** — времена кадров на шкале обучения (16 кадров за 3 с). Для 8 кадров берутся центры
+8 сегментов из 16, как при обучении.
 
-1. Положите файл в `models/` (`.onnx` для CPU и/или `.pth` для CUDA).
-2. Добавьте пути в `_models_pathes` под ключами `cpu=<имя>` / `cuda=<имя>`.
-3. Если вход не 224 — добавьте размер в `_CUDA_INPUT_SIZE` (для CPU размер
-   прочитается из графа автоматически).
-4. Для `.pth`, сохранённого целиком, — объявите класс архитектуры в
-   `_custom_models.py` и зарегистрируйте его через `_register_for_pickle`.
-5. Добавьте имя в `_ModelName` и в `EmotionModel` в
-   [`web_server/schemas.py`](web_server.md), чтобы модель появилась в UI.
+**`BoxStabilizer`** — скользящая медиана последних 7 рамок трека; при IoU с медианой ниже 0.5 история
+сбрасывается (резкое движение). Дрожание рамки заметно портит качество модели.
 
----
+**`crop_face(frame, box)`** — кроп как при обучении: запас 25 % с каждой стороны, resize в 224×224 без
+сохранения пропорций, RGB.
 
-## Особенности и подводные камни
+**`WindowSmoother(keep=0.5, undetermined_below=0.4)`** — EMA вероятностей по окнам (примерно среднее по
+2–3 окнам). Если максимум ниже 0.4, метка `None` — «не определено».
 
-- **`_MODELS_DIR` — относительный Windows-путь**
-  (`src\frames_processing\...`). Сервисы нужно запускать из корня
-  репозитория; в Linux-контейнере этот путь работать не будет — при
-  переносе замените на построение пути от `Path(__file__)`.
-- **`scripts/quantize_emotion_model.py` покрывает не все INT8-модели.** В
-  его `TARGETS` три записи, причём `convnext-int8` там генерируется из
-  `convnext_gelu_head.onnx`, а `_models_pathes` ждёт
-  `convnext_basic.int8.onnx`. Недостающие файлы можно получить вызовом с
-  `--model <файл>.onnx`, который кладёт результат рядом с исходником.
-- **INT8 на CPU без VNNI бывает медленнее FP32** — на i5-1135G7 ResNet-INT8
-  проседает примерно втрое (см. таблицу бенчмарка в README). Это ожидаемое
-  поведение динамической квантизации, а не ошибка сборки.
-- **`predict` всегда возвращает 2-D массив** `(N, num_classes)`; для
-  одиночного изображения `N == 1`. Пайплайн подаёт список кропов и
-  распаковывает построчно.
-- **Кропы имеют разный размер** — каждый ресайзится внутри `predict`,
-  батч собирается уже из приведённых к одному размеру тензоров.
+## Что уходит дальше
+
+- В результат кадра — сглаженные `emotion` и `emotion_scores` и `window_seq`.
+- На кадре нового окна — `emotion_window` с сырыми `logits`, `probs` и `emb`: их использует слияние
+  (стекинг по эмбеддингам требует именно сырые выходы).
+- В таймсерию трека — отсчёт `{t, label, scores}` для каждого окна с определённой эмоцией.
+
+## Старые модели
+
+`EmotionRecognizer` и `pipeline_utils.py` — прежние покадровые модели на 8 классов (ResNet, ConvNeXt,
+EfficientNet, Swin) и их сглаживание. Пайплайн их больше не использует; код оставлен для экспериментов
+и сравнения. Файлы этих моделей в Docker-образ не попадают.

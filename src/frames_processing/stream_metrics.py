@@ -1,5 +1,8 @@
 """Метрики реального времени: возраст кадра, отбрасывание устаревших кадров, сквозная задержка."""
 
+import logging
+import time
+
 from typing import Dict
 from typing import List
 from typing import Optional
@@ -28,23 +31,47 @@ class StalenessFilter:
     """
     Отбрасывание кадров старше max_age_ms по времени захвата: лучше пропустить кадр, чем копить задержку.
 
-    Время сравнивается между машинами, поэтому в распределённой установке нужен NTP.
+    Время сравнивается между машинами, поэтому в распределённой установке нужен NTP. Признаки расхождения часов
+    пишутся в лог не чаще раза в warn_interval_s: кадры «из будущего» дальше skew_tolerance_ms (часы источника
+    спешат) и длинная серия только устаревших кадров (отставание обработки или часы источника отстают).
     """
 
-    def __init__(self, max_age_ms: Optional[int]):
-        self.max_age_s = max_age_ms / 1000.0 if max_age_ms and max_age_ms > 0 else None
-        self.dropped   = 0
+    def __init__(self, max_age_ms: Optional[int], skew_tolerance_ms: int = 500, stale_run_warn: int = 100,
+                 warn_interval_s: float = 60.0, name: str = "frames"):
+        self.max_age_s         = max_age_ms / 1000.0 if max_age_ms and max_age_ms > 0 else None
+        self.skew_tolerance_s  = skew_tolerance_ms / 1000.0
+        self.stale_run_warn    = stale_run_warn
+        self.warn_interval_s   = warn_interval_s
+        self.name              = name
+        self.dropped           = 0
+        self.max_ahead_s       = 0.0
+        self._stale_run        = 0
+        self._last_warn        = float("-inf")
 
     def is_stale(self, payload: Dict, now: float) -> bool:
-        if self.max_age_s is None:
-            return False
         ts = capture_ts(payload)
         if ts is None:
             return False
-        if now - ts > self.max_age_s:
-            self.dropped += 1
-            return True
-        return False
+        age = now - ts
+        if -age > self.skew_tolerance_s:
+            self.max_ahead_s = max(self.max_ahead_s, -age)
+            self._warn(f"{self.name} captured {-age * 1000:.0f} ms in the future: clocks of the nodes differ, "
+                       f"sync them (NTP)")
+        if self.max_age_s is None or age <= self.max_age_s:
+            self._stale_run = 0
+            return False
+        self.dropped    += 1
+        self._stale_run += 1
+        if self._stale_run >= self.stale_run_warn:
+            self._warn(f"{self._stale_run} {self.name} in a row older than {self.max_age_s * 1000:.0f} ms "
+                       f"(last {age * 1000:.0f} ms): processing lags behind or the source clock is behind (NTP)")
+        return True
+
+    def _warn(self, message: str) -> None:
+        now = time.monotonic()
+        if now - self._last_warn >= self.warn_interval_s:
+            self._last_warn = now
+            logging.getLogger("staleness").warning(message)
 
 
 class LatencyWindow:

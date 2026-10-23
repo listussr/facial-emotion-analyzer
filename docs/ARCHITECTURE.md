@@ -1,352 +1,327 @@
 # Архитектура Affectra
 
-Документ описывает архитектуру сервиса по слоям и поясняет принятые
-проектные решения. Диаграммы — Mermaid, рендерятся на GitHub и
-экспортируются в SVG для тезисной работы.
+Документ описывает устройство системы по слоям и объясняет принятые проектные решения. Диаграммы —
+Mermaid, рендерятся на GitHub. Карта кода и форматы сообщений — в [`CODE_OVERVIEW.md`](CODE_OVERVIEW.md),
+подробности по модулям — в [`modules/`](modules/README.md).
 
 ---
 
 ## 1. Слои системы
 
-Affectra — это пять независимых процессов, обменивающихся через Apache
-Kafka, и одно общее хранилище состояния (Postgres + pgvector). Такая
-декомпозиция даёт три практических свойства:
-
-1. **Изоляция отказов.** Падение аннотатора не останавливает запись
-   таймсерий; падение веб-сервера не прерывает обработку.
-2. **Произвольная масштабируемость.** Каждую стадию можно вынести на
-   отдельный хост, поделить топик по партициям.
-3. **Замена алгоритмов без остановки.** Стадии слабо связаны — детектор
-   видит только кадр, трекер только bbox-ы, аннотатор только результаты.
+Affectra — восемь процессов, которые обмениваются сообщениями через Apache Kafka, плюс два хранилища:
+PostgreSQL с pgvector (лица, таймсерии, статусы записей) и S3-совместимое хранилище SeaweedFS (загрузки и
+итоговые записи сессий). Ни один сервис не держит у себя в памяти или на диске состояние, которое нужно
+другим, поэтому сервисы можно разнести по разным машинам.
 
 ```mermaid
 flowchart TB
-    subgraph "Захват"
-        P1["CameraProducer #1<br/>(RTSP / file / device 0)"]
-        P2["CameraProducer #2"]
-        PN["CameraProducer #N"]
+    subgraph "Источники"
+        B["камера и микрофон браузера\n(WebSocket /api/capture)"]
+        F["видеофайл"]
+        S["RTSP / HTTP / вебкамера"]
     end
 
-    subgraph "Шина Kafka"
-        R[raw-video-frames]
-        A[vision-analytics]
+    subgraph "ingest.py"
+        P["CameraProducer × N\n(по одному на сессию)"]
+        CAP["WS /api/capture"]
+    end
+
+    API["webapp.py\nFastAPI: REST · WS"]
+
+    subgraph "Kafka"
+        RV[raw-video-frames]
+        RA[raw-audio-chunks]
+        EV[session-events]
+        SC[session-config]
+        CMD[session-commands]
+        ST[session-status]
+        VA[vision-analytics]
+        AA[audio-analytics]
+        FA[fused-analytics]
         AN[annotated-video]
     end
 
     subgraph "Обработка"
-        PIPE["ProcessingPipeline<br/>(consumer.py)"]
-        ANN["VideoAnnotator<br/>(visualizer.py)"]
+        C["consumer.py\nлица и эмоции лица"]
+        AC["audio_consumer.py\nVAD и эмоции голоса"]
+        FU["fusion_consumer.py\nслияние"]
+        VI["visualizer.py\nсерверная разметка"]
+        AR["archiver.py\nитоговая запись"]
     end
 
-    subgraph "Доступ"
-        WS["Web Server<br/>(webapp.py / FastAPI)"]
-        UI["Browser UI<br/>(React)"]
-    end
+    DB[(PostgreSQL + pgvector)]
+    S3[(S3 · SeaweedFS)]
+    UI["frontend (React)"]
 
-    subgraph "Хранилище"
-        DB[(Postgres + pgvector)]
-    end
-
-    P1 --> R
-    P2 --> R
-    PN --> R
-    R --> PIPE
-    PIPE --> A
-    PIPE <--> DB
-    R --> ANN
-    A --> ANN
-    ANN --> AN
-    AN --> WS
-    A --> WS
-    WS <--> DB
-    UI <--> WS
+    B --> CAP --> P
+    F -->|S3| P
+    S --> P
+    API --> SC & CMD
+    CMD --> P
+    P --> RV & RA & EV & ST
+    ST --> API
+    RV --> C --> VA --> FU
+    RA --> AC --> AA --> FU
+    FU --> FA
+    RV --> VI
+    FA --> VI --> AN
+    RV & RA & FA & EV --> AR --> S3
+    C <--> DB
+    FU --> DB
+    AR --> DB
+    FA --> API
+    RV --> API
+    API <--> DB
+    API <--> S3
+    UI <--> API
 ```
 
-Топики Kafka и их роль:
+Декомпозиция на процессы даёт три свойства:
 
-| Топик | Кто пишет | Кто читает | Содержимое |
+1. **Изоляция отказов.** Падение аннотатора или архиватора не останавливает анализ; падение аудиосервиса
+   превращает слияние в «только лицо», но видео продолжает обрабатываться.
+2. **Независимое масштабирование.** Тяжёлые стадии (видео и голос) — отдельные процессы со своими
+   потоками ONNX Runtime; фоновые сервисы работают с пониженным приоритетом.
+3. **Замена алгоритмов без остановки.** Каждый сервис видит только свои входные топики; модели, трекер
+   и метод слияния выбираются на уровне сессии.
+
+### Топики Kafka
+
+| Топик | Пишет | Читают | Содержимое |
 |---|---|---|---|
-| `raw-video-frames` | `CameraProducer` | `ProcessingPipeline`, `VideoAnnotator`, web-server | msgpack: `{camera_id, frame_id, frame_data (JPEG), session_config, ...}` |
-| `vision-analytics` | `ProcessingPipeline` | `VideoAnnotator`, web-server (WS-канал) | JSON: `{camera_id, frame_id, faces: [{bbox, track_id, face_id, emotion, emotion_scores}]}` |
-| `annotated-video` | `VideoAnnotator` | web-server (MJPEG-эндпоинт) | msgpack: `{camera_id, frame_id, annotated_frame (JPEG с нанесёнными bbox-ами)}` |
+| `raw-video-frames` | продюсер сессии | consumer, visualizer, archiver, webapp (`/api/live`) | msgpack: кадр JPEG, `pts_ms`, время захвата |
+| `raw-audio-chunks` | продюсер сессии | audio-consumer, archiver | msgpack: PCM s16le 16 кГц, чанки по 100 мс |
+| `session-events` | продюсер сессии | все сервисы обработки, archiver | msgpack: `stream_start` / `stream_end` |
+| `session-config` | webapp | consumer, audio-consumer, fusion | msgpack: настройки сессии, топик с уплотнением (compaction) |
+| `session-commands` | webapp | ingest | msgpack: `start` с описанием сессии, `stop` |
+| `service-health` | все сервисы, кроме webapp | webapp | msgpack: сигнал экземпляра сервиса раз в 5 с (`starting` / `ready`), compacted |
+| `session-status` | ingest | webapp, ingest (владелец сессии браузера) | msgpack: состояние и статистика сессии, compacted, раз в секунду |
+| `vision-analytics` | consumer | fusion | JSON: лица кадра, эмоция лица, окно эмоций |
+| `audio-analytics` | audio-consumer | fusion | JSON: окно голоса, речь или нет, эмоция |
+| `fused-analytics` | fusion | webapp (`/api/events`), visualizer, archiver | JSON: лица кадра с итоговой эмоцией |
+| `annotated-video` | visualizer | webapp (MJPEG) | msgpack: размеченный кадр JPEG |
+
+Во всех топиках ключ — `camera_id`, и число партиций одинаковое. Поэтому видео, звук, события и аналитика
+одной сессии попадают в партиции с одним номером, и порядок внутри сессии сохраняется.
+
+Kafka работает в режиме KRaft: брокер и контроллер метаданных в одном процессе, ZooKeeper не нужен. На одной
+машине это один узел с репликацией 1. `docker-compose.kafka-cluster.yml` добавляет ещё два узла: кворум
+контроллеров из трёх, у топиков 3 реплики и `min.insync.replicas=2`. Конфиги, команды и события сессий
+пишутся с `acks=all` и идемпотентностью, поэтому они переживают падение любого узла. Медиа пишутся с
+`acks=1`: для живого анализа свежесть кадра важнее гарантии доставки. Проверено остановкой брокера-лидера:
+лидерство перешло на другой узел, запись и чтение статусов не прервались, вернувшийся брокер догнал реплики.
 
 ---
 
-## 2. Стадии обработки
+## 2. Путь в реальном времени
 
-`ProcessingPipeline._handle_frame` обрабатывает один кадр в пять
-последовательных шагов. Каждый шаг — отдельный модуль; контракт между
-ними намеренно узкий, что позволило менять алгоритмы без правки
-остального кода.
-
-```mermaid
-flowchart LR
-    A["1. Захват<br/>cv2.imdecode JPEG"]
-    B["2. Детекция<br/>MediaPipe → geometry filter<br/>min_confidence, ratio, area"]
-    C["3. Трекинг<br/>get_tracker(session) → DeepSORT | ByteTrack"]
-    D["4. Идентификация<br/>FaceNet (async) → pgvector"]
-    E["5. Эмоции<br/>batch inference → softmax<br/>EMA + hysteresis smoothing"]
-    F["6. Аннотация результата<br/>(faces[].bbox, track_id, face_id, emotion, emotion_scores)"]
-    G["7. Сохранение<br/>JSONB row при эвикции трека"]
-
-    A --> B --> C --> D --> E --> F --> G
-```
-
-### 2.1. Детекция (`face_detection`)
-
-Используется MediaPipe Face Detection (модель `blaze_face_short_range`).
-Кадр предварительно уменьшается до `scale=0.5` для скорости; bbox'ы
-масштабируются обратно. Геометрические фильтры отсекают шум:
-
-- `width, height ≥ 40 px`
-- `0.75 ≤ height/width ≤ 1.7`
-- `0.002 · frame_area ≤ bbox_area ≤ 0.5 · frame_area`
-
-Фильтр `fast_face_filter` дополнительно проверяет, что у изображения
-есть достаточная градиентная структура — отсекает однородные ложно-
-положительные срабатывания.
-
-### 2.2. Трекинг (`faces_tracking`)
-
-Два алгоритма за общим интерфейсом `_Tracker` (см.
-`faces_tracking/tracker.py`):
-
-- **DeepSORT** — Kalman + Re-ID эмбеддер (MobileNet). Лучше через
-  перекрытия, но даёт ~10× нагрузку на CPU.
-- **ByteTrack** — motion-only, без CNN. На i5-1135G7 в ~3× быстрее.
-
-Для пайплайна каждая сессия (`camera_id`) получает **свой** инстанс
-трекера — состояние (Kalman, ID-counter) уникально для сессии.
-
-### 2.3. Идентификация (`face_identification`)
-
-Поток построен с упором на то, что инференс FaceNet и поиск в pgvector
-**не должны блокировать стадию B пайплайна**. Алгоритм:
-
-1. Пайплайн встретил новый трек → вставил cached-запись с
-   `face_id = "pending-init"` и сразу продолжил.
-2. Параллельно отправил задачу в однопоточный `_db_executor` внутри
-   `FaceIdentifier`.
-3. Воркер считает 512-мерный эмбеддинг (Inception-ResNetV1, веса
-   VGGFace2), ищет ближайшего соседа в `face_embeddings` через
-   `embedding <=> %s::vector` (cosine). Если similarity ≥ threshold
-   (по умолчанию 0.4) — берём существующий UUID; иначе вставляем
-   новый.
-4. По завершении воркер вызывает `on_resolved(real_id)` — пайплайн
-   обновляет `cached["face_id"]` атомарно (GIL гарантирует).
-
-При завершении трека таймсерия эмоций сбрасывается в
-`emotion_timeseries` с этим самым `face_id`. Pending-id игнорируются.
-
-### 2.4. Эмоции (`emotion_recognition`)
-
-8 классов: `anger, contempt, disgust, fear, happy, neutral, sad, surprise`.
-Шесть архитектур; CPU-инференс через ONNX Runtime, GPU — через PyTorch.
-
-```mermaid
-classDiagram
-    class _Recognizer {
-        +predict(images) np.ndarray
-    }
-    class _RecognizerCPU {
-        -_session : ort.InferenceSession
-        -_input_h, _input_w : int
-    }
-    class _RecognizerCuda {
-        -model : nn.Module
-        -_transform : transforms.Compose
-        -_device : torch.device
-    }
-    class EmotionRecognizer {
-        <<factory>>
-        +__new__(model, device, num_threads) _Recognizer
-    }
-    _Recognizer <|-- _RecognizerCPU
-    _Recognizer <|-- _RecognizerCuda
-    EmotionRecognizer ..> _RecognizerCPU : creates
-    EmotionRecognizer ..> _RecognizerCuda : creates
-```
-
-Сглаживание — **EMA + гистерезис** (`pipeline_utils.py`). EMA удерживает
-скользящее среднее по вероятностям; гистерезис требует подтверждения
-смены лидера N раз подряд, чтобы лента эмоций не «дёргалась».
-
-Эмоции считаются **батчем по всем лицам кадра** — один прогон модели
-вместо N последовательных. На сессиях с несколькими лицами даёт
-50–80% буст к FPS.
-
-### 2.5. Аннотация и сохранение
-
-После всех стадий пайплайн пишет:
-
-1. В Kafka `vision-analytics` — JSON для аннотатора и WS-канала.
-2. В Postgres `emotion_timeseries` — JSONB-блок таймсерии, **только
-   когда трек уходит из кэша** (по `_INACTIVITY_TIMEOUT = 5 секунд`),
-   с агрегацией всех точек этого трека за время его жизни.
-
----
-
-## 3. Per-session routing
-
-В одной инсталляции Affectra одновременно могут жить сессии с разными
-алгоритмами. Например, веб-камера ресепшна на ByteTrack + ResNet-18 INT8
-(быстро, шумно, ID-switch допустимы) и загруженное видео интервью на
-DeepSORT + ConvNeXt (точно, ID стабильны).
-
-Конкретный путь конфигурации через систему:
+Задача — показать эмоции с задержкой в доли секунды, не копя очередь.
 
 ```mermaid
 sequenceDiagram
-    autonumber
-    participant U as Frontend
-    participant W as web_server
-    participant SM as SessionManager
-    participant CP as CameraProducer
-    participant K as Kafka
-    participant P as ProcessingPipeline
+    participant Src as Источник
+    participant Prod as CameraProducer (ingest)
+    participant V as consumer
+    participant A as audio-consumer
+    participant Fu as fusion
+    participant W as webapp
+    participant UI as браузер
 
-    U->>W: POST /api/sessions/camera<br/>{name, source, config: {tracker, model, device}}
-    W->>SM: create_camera(...)
-    SM->>SM: _probe_source (cv2.VideoCapture)
-    SM->>CP: CameraConfig(tracker_name, emotion_model, compute_device, ...)
-    SM->>CP: producer.start()  (отдельный thread)
-    SM-->>W: SessionInfo
-    W-->>U: 200 OK
-
-    loop каждый кадр
-        CP->>K: msgpack {camera_id, frame_data, session_config}
-        K->>P: poll
-        P->>P: tracker = _get_session_tracker(camera_id, session_config)
-        Note over P: создаётся лениво,<br/>тип берётся из session_config
-        P->>P: recognizer = _get_recognizer(session_config)
-        Note over P: пул по (model, device, threads) —<br/>одинаковые модели шарятся
-        P->>P: detect → track → identify → emotion
-        P->>K: vision-analytics {faces[]}
-    end
-
-    Note over P: когда трек уходит из кэша →<br/>_flush_emotion_timeseries → Postgres
+    Src->>Prod: кадры и звук (pts на общих часах сессии)
+    Prod->>V: raw-video-frames (20 кадров/с)
+    Prod->>A: raw-audio-chunks (100 мс)
+    Prod->>W: raw-video-frames
+    W->>UI: /api/live — исходные кадры
+    V->>Fu: vision-analytics (каждый кадр, окно лица раз в 1 с)
+    A->>Fu: audio-analytics (окно 3 с, шаг 1 с)
+    Fu->>W: fused-analytics
+    W->>UI: /api/events — аналитика
+    UI->>UI: рамки поверх кадров по pts_ms
 ```
 
-Реализация — в `ProcessingPipeline._get_session_tracker` и
-`_get_recognizer`. Стоимость:
+- **Общее время.** У каждого кадра и аудиочанка есть `pts_ms` — время от начала сессии на одних часах.
+  По нему окно лица сопоставляется с окном голоса, а браузер совмещает рамки с кадрами.
+- **Свежесть важнее полноты.** Сервисы отбрасывают сообщения старше порога (`MAX_FRAME_AGE_MS = 1000`
+  для видео, 2000 для звука и слияния). Продюсер при переполнении очереди теряет кадры, но не звук.
+- **Рисует браузер.** Браузер получает исходные кадры и аналитику по двум WebSocket, задерживает показ на
+  величину задержки аналитики и интерполирует рамки по времени. Серверная разметка (`visualizer`)
+  остаётся фоновой и в путь реального времени не входит.
 
-- **Трекеры**: лёгкие (Kalman + IoU), память ~1 МБ на сессию.
-- **Распознаватели**: тяжёлые (45–110 МБ для FP32), поэтому **шарятся**
-  по ключу `(model, device, num_threads)`. Две сессии с одинаковой
-  моделью грузят её один раз.
+## 3. Путь после сессии
 
----
-
-## 4. Threaded pipeline (Stage A / B / C)
-
-`ProcessingPipeline.process` запускает три стадии в отдельных потоках,
-связанные ограниченными очередями. Это даёт прирост FPS, когда
-producer обгоняет процессор: Stage A декодирует следующий кадр, пока
-Stage B считает текущий, а Stage C параллельно публикует предыдущий.
+После `stream_end` архиватор собирает итоговую запись: в ней все модальности уже слиты.
 
 ```mermaid
 flowchart LR
-    K1[(Kafka<br/>raw-video-frames)]
-    A["Stage A (thread)<br/>consume + msgpack + cv2.imdecode"]
-    Q1[/in_q<br/>maxsize=4/]
-    B["Stage B (main)<br/>_handle_frame:<br/>detect / track / identify / emotion"]
-    Q2[/out_q<br/>maxsize=4/]
-    C["Stage C (thread)<br/>JSON encode + Kafka produce"]
-    K2[(Kafka<br/>vision-analytics)]
-
-    K1 --> A --> Q1 --> B --> Q2 --> C --> K2
+    RV[raw-video-frames] --> SP["спул на диске\nJPEG · PCM · аналитика"]
+    RA[raw-audio-chunks] --> SP
+    FA[fused-analytics] --> SP
+    EV["session-events\nstream_end"] --> W{"аналитика дошла\nдо последнего кадра\nили прошло 15 с?"}
+    SP --> W
+    W --> R["рендер\nH.264 + AAC, рамки"]
+    R --> S3[(S3)]
+    R --> J["analytics.json\nтаймлайн + сводка"] --> S3
+    R --> DB[("session_recordings\nстатус")]
 ```
 
-**Backpressure** обеспечивается ограниченными очередями: если Stage B
-отстаёт, Stage A блокируется на `put`, чтение из Kafka замедляется до
-скорости обработки. Без этого память росла бы при медленном Stage B.
-
-Контроль в бенчмарке: `bytetrack_resnet18_t7_seq` (без pipelining) даёт
-53 FPS, с pipelining `bytetrack_resnet18_t7` — 48 FPS. На текущем
-видео producer не обгоняет процессор, и pipelining добавляет ~5%
-overhead. Это нормально и обсуждено в разделе «Оптимизация»: pipelining
-включается, когда производитель быстрее потребителя.
+Во время сессии архиватор ничего не перекодирует, а только складывает данные на диск, чтобы не отнимать
+CPU у анализа. Рендер идёт в одном фоновом потоке с пониженным приоритетом. Статусы записи:
+`recording` → `rendering` → `ready` или `failed`.
 
 ---
 
-## 5. Схема Postgres
+## 4. Видео: стадии обработки кадра
 
 ```mermaid
-erDiagram
-    face_embeddings ||--o{ emotion_timeseries : "user_id"
-    face_embeddings {
-        serial id PK
-        uuid user_id UK "gen_random_uuid()"
-        vector(512) embedding "ivfflat cosine_ops"
-        timestamptz first_seen
-        bytea face_image "JPEG-кроп лица"
-    }
-    emotion_timeseries {
-        serial id PK
-        uuid user_id FK
-        jsonb data "samples, started/ended_at, camera_id, track_id"
-        timestamptz created_at
-    }
+flowchart LR
+    D["Детекция\nYuNet, раз в N кадров"] --> T{"Трекер"}
+    T -->|кадр с детекцией| U["update"]
+    T -->|между детекциями| PR["predict"]
+    U --> ID["Идентификация\nFaceNet → pgvector\n(фоном)"]
+    U --> CR["Кроп лица\nмедиана рамок, запас 25 %"]
+    CR --> EN["Энкодер Swin-T\n(фоновый поток, батч)"]
+    EN --> CL["Окно трека\n8 или 16 кадров за 3 с"]
+    CL --> HD["Временная голова\nраз в 1 с"]
+    HD --> SM["Сглаживание\nEMA, порог «не определено»"]
+    SM --> OUT["vision-analytics"]
+    PR --> OUT
 ```
 
-Индекс `idx_face_embeddings` — IVFFlat с метрикой cosine для поиска
-ближайших соседей. При 100+ лицах в базе ускоряет k-NN на порядок.
+1. **Детекция** — YuNet (`cv2.FaceDetectorYN`): на его рамках обучалась модель эмоций. Кадр уменьшается
+   до 480 пикселей по длинной стороне. Детектор работает раз в `DETECTION_FREQUENCY = 2` кадра, между
+   детекциями трекер предсказывает рамки.
+2. **Трекинг** — ByteTrack (по умолчанию) или DeepSORT за общим интерфейсом. При детекции раз в N кадров
+   частота и порог подтверждения ByteTrack делятся на N: иначе треки теряются.
+3. **Идентификация** — эмбеддинг FaceNet ищется в pgvector в отдельном потоке. Пока ответа нет, трек
+   носит временный `pending-…`-идентификатор.
+4. **Эмоции лица** считаются по окну, а не по кадру. Признаки кропов (Swin-T, 768 чисел) копятся по треку
+   на шкале времени. Раз в `EMOTION_HOP_MS = 1000` временная голова оценивает окно из 8 или 16 кадров
+   за последние 3 с. Кодирование кропов вынесено в фоновый поток: если оно не успевает, кропы
+   пропускаются, а кадры не задерживаются.
+5. **Сглаживание** — EMA по окнам; при максимальной вероятности ниже 0.4 эмоция «не определена».
 
-Запросы — в `db_managing/_faces_db_handler.py` и
-`web_server/routes/history.py`.
+Конвейер `consumer.py` — три стадии в разных потоках: A — чтение Kafka и декодирование JPEG, B — обработка
+кадра, C — отправка результата. Очереди между стадиями короткие (4 элемента), чтобы задержка не копилась.
+
+## 5. Голос
+
+Звук режется на окна 3 с с шагом 1 с. Окно проходит два фильтра:
+
+1. **Энергетический VAD** — доля кадров по 20 мс громче −45 dBFS. Тишина отсекается почти бесплатно.
+2. **Silero VAD** — доля кадров по 32 мс с речью. Отсекает музыку, шум и тоны.
+
+Если доля речи не меньше `VAD_THRESHOLD = 0.3`, окно уходит в WavLM-Base+. Окно без речи всё равно
+публикуется с `is_speech = false`: слиянию нужно знать, что голоса нет. Результаты сглаживаются с
+гистерезисом смены метки.
+
+## 6. Слияние модальностей
+
+Сервис слияния держит по каждой камере последние окна голоса и по каждому треку — последнее окно лица.
+
+- Когда у трека появляется новое окно лица, к нему подбирается окно голоса с наибольшим перекрытием
+  по времени (не меньше `min_overlap_ms = 1000`). Пара сливается методом сессии.
+- Если окна лица ещё нет, используется последнее окно с речью не старше `voice_max_age_ms` — получается
+  «только голос».
+- Голос приписывается лицу, только если в кадре одно лицо. Если окно лица уже слито с голосом, мелькнувшее
+  второе лицо этот голос не снимает (защита от мерцания).
+
+Методы слияния — из `emotion_kit`: обученные (`stack_hidden`, `stack_logits`, `weighted_logits[_robust]`)
+и без обучения (`confidence_weighted`, `mean_probs`, `audio_only`, `video_only`). Без файла параметров
+обученные методы заменяются на `mean_probs`. В результате кадра поле `fusion_used` показывает, что
+реально слито, например `stack_hidden -> video_only (нет аудио)`.
 
 ---
 
-## 6. Frontend
+## 7. Настройки по сессиям
 
-Single-page React 18 приложение, организованное вокруг роутера:
+Каждая сессия может иметь свои модели, частоту, трекер и метод слияния. Настройки не передаются в каждом
+кадре, а живут в отдельном топике:
 
+```mermaid
+sequenceDiagram
+    participant UI as Интерфейс
+    participant W as webapp
+    participant K as session-config
+    participant I as ingest
+    participant S as сервисы обработки
+
+    UI->>W: POST /api/uploads/session {config}
+    W->>K: publish(SessionConfig, acks=all) — до первого кадра
+    W->>I: session-commands: start
+    I->>I: старт продюсера, статус в session-status
+    K-->>S: SessionConfigStore читает топик фоном
+    S->>S: settings(camera_id) = секция сессии поверх значений по умолчанию
+    I->>K: tombstone после конца сессии
 ```
-/                 — главная (превью активных сессий)
-/cameras          — сетка камер (1×1 / 2×2 / 3×3)
-/cameras/:id      — фокус камеры
-/uploads          — загрузка файлов + сетка
-/uploads/:id      — фокус видеофайла
-/history          — поиск по фото → top-K похожих
-/history/:userId  — детальная история эмоций
-/settings         — управление камерами и параметрами
-/about            — этика и обзор системы
-```
 
-Состояние:
-- **REST-поллинг** (`useSessions`, `useUiPrefs`) — каждые 2.5–5 секунд.
-- **WebSocket** (`useSessionEvents`) — live-события аналитики (~25 Hz).
-- **localStorage** — UI-предпочтения (число похожих лиц при поиске).
+- Конфиг разделён на секции `vision`, `audio`, `fusion`: каждый сервис читает только свою.
+- Ревизия растёт с каждым изменением, старая ревизия никогда не перетирает новую.
+- Сервис кэширует ресурсы по ключу настроек: модель с теми же параметрами переиспользуется между сессиями,
+  смена трекера пересоздаёт только трекер камеры.
+- Если на первом кадре конфиг ещё не прочитан, видеосервис ненадолго ждёт его, затем работает на значениях
+  по умолчанию.
 
-Графики (`components/charts/`) — собственные SVG-компоненты без
-сторонних библиотек: `EmotionBars`, `EmotionTimeline`,
-`EmotionLines` (линии вероятностей), `EmotionAreaChart` (stacked area),
-`EmotionRadar` (polar профиль). Сэмплы прорежены до 600 точек для
-плавности.
+## 8. Хранилища
 
----
+**PostgreSQL + pgvector**
 
-## 7. Принятые проектные решения и компромиссы
-
-| Решение | Альтернатива | Аргумент |
+| Таблица | Что хранит | Кто пишет |
 |---|---|---|
-| Kafka между сервисами | gRPC / HTTP | Декаплинг отказов; уже есть как infra |
-| msgpack для кадров | JSON | Бинарные JPEG → msgpack ≈ 2× меньше overhead, чем base64 |
-| Stage A/B/C в одном процессе | разные процессы | Сложность networking-а перевешивает выигрыш для текущей нагрузки |
-| Сглаживание EMA+гистерезис | argmax-каждый-кадр | Стабильная лента эмоций без флика; pacing setting `emotion_frequency` |
-| Per-session lazy spawn | глобальная очередь | Тяжёлые модели грузятся только когда нужны; рекомендации стабильны |
-| pgvector | FAISS / Elasticsearch | Один сервис, общая транзакция с face_image |
-| ONNX Runtime + XNNPACK | TensorRT | Кроссплатформенно; INT8-выигрыш на VNNI CPU |
-| MJPEG для UI | WebRTC / HLS | Простота; `<img>` рендерит нативно; latency ~50 мс ок для демо |
+| `face_embeddings` | эмбеддинг FaceNet (vector 512), снимок лица, время первого появления | consumer |
+| `emotion_timeseries` | таймсерия эмоций трека человека; `modality` = `face` или `fused` | consumer, fusion |
+| `session_audio_timeseries` | окна голоса сессии без привязки к человеку | fusion |
+| `session_recordings` | статус итоговой записи, ключи в S3, сводка | webapp (имя), archiver (статус) |
+
+Схема приводится к текущей версии идемпотентными миграциями при подключении любого сервиса
+(`src/db_managing/schema.py`).
+
+**S3 (SeaweedFS)** — бакет `affectra-recordings`: загрузки `uploads/<id>.<ext>` с метаданными (исходное имя,
+дорожки, длительность) и записи `sessions/<id>/recording.mp4`, `sessions/<id>/analytics.json`. Загрузки лежат в
+хранилище, а не на диске веб-сервера, чтобы узел приёма мог работать на другой машине. Веб-сервер отдаёт видео потоком с поддержкой Range, поэтому в браузере
+работает перемотка. Образы MinIO в 2025 году перестали публиковаться, поэтому выбран SeaweedFS
+(Apache 2.0); код работает с любым S3-совместимым хранилищем через boto3.
+
+## 9. Веб-интерфейс
+
+React + TypeScript + Vite + Tailwind, в Docker раздаётся nginx, который проксирует `/api` и WebSocket на
+webapp. Разделы:
+
+- **Анализ** — запуск в три шага: источник, что анализировать, название. Ниже — идущие и завершённые сессии.
+- **Сессия** — видео с рамками, кто в кадре и что чувствует, голос; статистика и технические подробности
+  свёрнуты.
+- **Записи** — итоговые видео, распределения эмоций, скачивание.
+- **Люди** — поиск по фото и история человека.
+- **Настройки** — значения по умолчанию для новых анализов (хранятся в браузере).
+
+Камера браузера — модуль `capture/browserCapture.ts` вне React-дерева, поэтому захват не прерывается при
+переходах между страницами. Кадры уменьшаются до 640×480 и кодируются в JPEG на canvas, звук приводится
+к 16 кГц моно в AudioWorklet.
 
 ---
 
-## 8. Дальнейшее развитие (упомянуть в work plan)
+## 10. Проектные решения и компромиссы
 
-- Static INT8 quantization с калибровочным датасетом — даст реальный
-  выигрыш для свёрточных моделей на VNNI CPU.
-- Поддержка TensorRT на GPU.
-- Multi-camera fusion: совместный треккинг лиц через несколько камер.
-- Аналитика поверх `emotion_timeseries`: тренды, аномалии, групповая
-  агрегация настроения.
-- Полноценная аутентификация в веб-интерфейсе (сейчас локальная сеть).
+| Решение | Почему | Цена |
+|---|---|---|
+| Kafka между стадиями | изоляция отказов, повтор и подключение новых потребителей без изменений продюсера | лишний сервис в развёртывании, сериализация |
+| Эмоции лица по окну 3 с, а не по кадру | так обучена модель CREMA-D; окно устойчивее к морганиям и ракурсу | оценка обновляется раз в секунду, первая — через 3 с |
+| Детектор раз в 2 кадра | детектор — самая дорогая часть кадра; IoU рамок 0.93, совпадение эмоций 98.7 % | рамки между детекциями — прогноз трекера |
+| Рамки рисует браузер | живой показ с частотой источника без перекодирования на сервере | браузер совмещает кадры и аналитику сам |
+| Слияние — отдельный сервис | голос и видео приходят с разной задержкой; слияние не тормозит ни одну модальность | ещё один сервис и топик |
+| Итоговая запись после сессии | сессия анализируется в реальном времени, а итог — с полной слитой аналитикой и звуком | запись готова через несколько секунд после конца |
+| Энергетический VAD + Silero | модель голоса не тратит CPU на тишину, музыку и шум (на смешанном ролике 48 % → 15 % CPU) | 15–20 мс на окно |
+| int8 по умолчанию | вдвое быстрее на CPU, точность почти не меняется | fp32 доступен как режим «Точнее» |
+| Конфиг сессии в compacted-топике | сервисы узнают настройки без запросов к webapp и после перезапуска | конфиг надо публиковать до первого кадра |
+| Kafka в режиме KRaft, кластер — отдельным файлом | без ZooKeeper на один процесс меньше; на одной машине один брокер, для отказоустойчивости три | при смене режима топики пересоздаются |
+| Запуск анализа после загрузки моделей | первая сессия после старта не теряет голос или лицо; состояние сервисов видно в интерфейсе | сигнал каждого сервиса раз в 5 с, проверка перед стартом сессии |
+| Продюсеры в отдельном сервисе приёма | веб-сервер не читает медиа; приём можно держать рядом с камерами, сессии переживают перезапуск веб-сервера | команды и статусы через Kafka, старт сессии ждёт ответа узла |
+
+## 11. Дальнейшее развитие
+
+- оценка точности всей системы на тестовой части CREMA-D и сравнение с офлайн-метриками моделей;
+- бенчмарк в Docker: кадры в секунду и задержка в зависимости от частоты детекции, режима и числа сессий;
+- отчёт по сессии с ключевыми моментами и расхождениями лица и голоса;
+- метрики сервисов (Prometheus, Grafana);
+- отказоустойчивое хранение: репликация PostgreSQL и SeaweedFS с несколькими volume-серверами (развёртывание на
+  нескольких машинах — [DEPLOYMENT.md](DEPLOYMENT.md));
+- Kubernetes-манифесты по образцу стека Swarm.

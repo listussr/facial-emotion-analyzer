@@ -1,0 +1,52 @@
+# Два узла приёма за одним адресом, поверх docker-compose.yml (можно вместе с docker-compose.kafka-cluster.yml):
+#
+#   docker compose down
+#   docker compose -f docker-compose.yml -f docker-compose.multi-ingest.yml up -d
+#
+# Узлы делят команды сессий через группу Kafka по партициям session-commands, поэтому партиций нужно не меньше
+# числа узлов (здесь по умолчанию 2; топики создаются заново после docker compose down). nginx раздаёт
+# WebSocket камеры браузера по обоим узлам, а узел без этой сессии пересылает медиа её владельцу.
+
+services:
+
+  topics-init:
+    environment:
+      PARTITIONS: ${TOPIC_PARTITIONS:-2}
+
+  ingest-2:
+    image: affectra-python:latest
+    container_name: affectra-ingest-2
+    depends_on:
+      topics-init:
+        condition: service_completed_successfully
+      s3:
+        condition: service_started
+    restart: unless-stopped
+    command: ["python", "ingest.py"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os, sys, time; sys.exit(time.time() - os.path.getmtime('/tmp/affectra-ready') > 30)"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 120s
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP:-kafka:29092}
+      OPENCV_NUM_THREADS:      "1"
+      HEALTH_FILE:             /tmp/affectra-ready
+      TOPIC_SESSION_EVENTS:    session-events
+      TOPIC_SESSION_CONFIG:    session-config
+      TOPIC_RAW:               raw-video-frames
+      TOPIC_AUDIO_RAW:         raw-audio-chunks
+      TOPIC_SESSION_COMMANDS:  session-commands
+      TOPIC_SESSION_STATUS:    session-status
+      INGEST_CACHE_DIR:        /app/data/ingest_cache
+      S3_ENDPOINT:             http://s3:8333
+      S3_ACCESS_KEY:           ${S3_ACCESS_KEY:-affectra}
+      S3_SECRET_KEY:           ${S3_SECRET_KEY:-affectra-secret}
+      S3_BUCKET:               ${S3_BUCKET:-affectra-recordings}
+    networks:
+      default:
+        aliases: [ingest]
+
+  frontend:
+    depends_on: [webapp, ingest, ingest-2]

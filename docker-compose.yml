@@ -1,18 +1,21 @@
-# Полный стек Affectra: kafka · postgres · s3 (SeaweedFS) · consumer · audio-consumer · fusion · visualizer · archiver
+# Полный стек Affectra на одной машине: kafka (KRaft) · postgres · s3 (SeaweedFS) · ingest · consumer · audio-consumer · fusion · visualizer · archiver
 # · webapp · frontend
 #
 #   docker compose up -d --build
 #
-# UI http://localhost:8080 · API http://localhost:8000/docs · Kafka UI http://localhost:7000
+# UI http://localhost:8080 (https://localhost:8443) · API http://localhost:8000/docs · Kafka UI http://localhost:7000
 # S3 http://localhost:8333 · Postgres localhost:5433 · Kafka localhost:9092
 #
 # Модели CREMA-D должны лежать в ./models/crema (распакованный crema_emotion_models.zip).
+#
+# Kafka из трёх брокеров с репликацией: docker compose -f docker-compose.yml -f docker-compose.kafka-cluster.yml up -d
 
 x-python-env: &python-env
-  KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+  KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP:-kafka:29092}
   TOPIC_SESSION_EVENTS:    session-events
   TOPIC_SESSION_CONFIG:    session-config
   OPENCV_NUM_THREADS:      "1"
+  HEALTH_FILE:             /tmp/affectra-ready
 
 x-db-env: &db-env
   DB_HOST:     postgres
@@ -31,32 +34,42 @@ x-s3-env: &s3-env
   S3_SECRET_KEY: ${S3_SECRET_KEY:-affectra-secret}
   S3_BUCKET:     ${S3_BUCKET:-affectra-recordings}
 
+# Сервис готов, пока обновляет файл готовности (модели загружены, сигнал в service-health идёт)
+x-ready-check: &ready-check
+  test: ["CMD", "python", "-c", "import os, sys, time; sys.exit(time.time() - os.path.getmtime('/tmp/affectra-ready') > 30)"]
+  interval: 10s
+  timeout: 5s
+  retries: 3
+  start_period: 300s
+
 x-models: &models
   - ./models/crema:/app/models/crema:ro
 
 services:
 
-  zookeeper:
-    image: zookeeper:3.8
-    container_name: affectra-zookeeper
-    restart: unless-stopped
-
+  # Брокер и контроллер в одном процессе (KRaft, без ZooKeeper)
   kafka:
     image: confluentinc/cp-kafka:7.4.0
     container_name: affectra-kafka
-    depends_on: [zookeeper]
     restart: unless-stopped
     ports:
       - "9092:9092"
     environment:
-      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT_INTERNAL:PLAINTEXT,PLAINTEXT_EXTERNAL:PLAINTEXT
-      KAFKA_LISTENERS: PLAINTEXT_INTERNAL://0.0.0.0:29092,PLAINTEXT_EXTERNAL://0.0.0.0:9092
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT_INTERNAL://kafka:29092,PLAINTEXT_EXTERNAL://localhost:9092
+      CLUSTER_ID: ${KAFKA_CLUSTER_ID:-YWZmZWN0cmEta2Fma2EtMQ}
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:29093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT_INTERNAL:PLAINTEXT,PLAINTEXT_EXTERNAL:PLAINTEXT
+      KAFKA_LISTENERS: PLAINTEXT_INTERNAL://0.0.0.0:29092,CONTROLLER://0.0.0.0:29093,PLAINTEXT_EXTERNAL://0.0.0.0:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT_INTERNAL://kafka:29092,PLAINTEXT_EXTERNAL://${KAFKA_EXTERNAL_HOST:-localhost}:9092
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT_INTERNAL
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
       KAFKA_MESSAGE_MAX_BYTES: 10485760
       KAFKA_REPLICA_FETCH_MAX_BYTES: 10485760
+      KAFKA_HEAP_OPTS: ${KAFKA_HEAP_OPTS:--Xms256m -Xmx768m}
       # Топики создаёт topics-init: автосоздание дало бы session-config без compaction
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
     healthcheck:
@@ -74,13 +87,16 @@ services:
         condition: service_healthy
     restart: "no"
     environment:
-      PARTITIONS: ${TOPIC_PARTITIONS:-1}
+      BOOTSTRAP:   kafka:29092
+      PARTITIONS:  ${TOPIC_PARTITIONS:-1}
+      REPLICATION: "1"
+      MIN_ISR:     "1"
     entrypoint: ["bash", "-c"]
     command:
       - |
         set -e
-        B=kafka:29092
-        create() { kafka-topics --bootstrap-server $$B --create --if-not-exists --topic "$$1" --partitions "$$PARTITIONS" --replication-factor 1 $${2:+--config} $${2:-} $${3:+--config} $${3:-} $${4:+--config} $${4:-}; }
+        B=$$BOOTSTRAP
+        create() { kafka-topics --bootstrap-server $$B --create --if-not-exists --topic "$$1" --partitions "$$PARTITIONS" --replication-factor "$$REPLICATION" --config min.insync.replicas=$$MIN_ISR $${2:+--config} $${2:-} $${3:+--config} $${3:-} $${4:+--config} $${4:-}; }
         create raw-video-frames retention.ms=1800000
         create raw-audio-chunks retention.ms=1800000
         create annotated-video  retention.ms=1800000
@@ -89,6 +105,9 @@ services:
         create audio-analytics
         create fused-analytics
         create session-config cleanup.policy=compact segment.ms=3600000 min.cleanable.dirty.ratio=0.1
+        create session-status cleanup.policy=compact segment.ms=600000 min.cleanable.dirty.ratio=0.1
+        create session-commands retention.ms=3600000
+        create service-health   cleanup.policy=compact segment.ms=600000 min.cleanable.dirty.ratio=0.1
         kafka-topics --bootstrap-server $$B --list
 
   kafka-ui:
@@ -100,10 +119,11 @@ services:
       - "7000:8080"
     environment:
       KAFKA_CLUSTERS_0_NAME: local
-      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: ${KAFKA_BOOTSTRAP:-kafka:29092}
 
   postgres:
     build: ./faces_emotions_database
+    image: affectra-postgres:latest
     container_name: affectra-postgres
     restart: unless-stopped
     ports:
@@ -129,6 +149,29 @@ services:
     volumes:
       - s3_data:/data
 
+  # Приём медиа: продюсеры сессий по командам (session-commands), статусы (session-status), камера браузера по WS
+  ingest:
+    image: affectra-python:latest
+    container_name: affectra-ingest
+    depends_on:
+      <<: *after-topics
+      consumer:
+        condition: service_started
+      s3:
+        condition: service_started
+    restart: unless-stopped
+    command: ["python", "ingest.py"]
+    healthcheck: *ready-check
+    environment:
+      <<: [*python-env, *s3-env]
+      TOPIC_RAW:              raw-video-frames
+      TOPIC_AUDIO_RAW:        raw-audio-chunks
+      TOPIC_SESSION_COMMANDS: session-commands
+      TOPIC_SESSION_STATUS:   session-status
+      INGEST_CACHE_DIR:       /app/data/ingest_cache
+    volumes:
+      - ingest_cache:/app/data/ingest_cache
+
   # Лица → эмоции лица (vision-analytics), таймсерии лиц в БД
   consumer:
     build:
@@ -142,6 +185,7 @@ services:
         condition: service_started
     restart: unless-stopped
     command: ["python", "consumer.py"]
+    healthcheck: *ready-check
     volumes: *models
     environment:
       <<: [*python-env, *db-env]
@@ -160,7 +204,7 @@ services:
       IDENTIFICATION_ENABLED: ${IDENTIFICATION_ENABLED:-true}
       MAX_FRAME_AGE_MS:       ${MAX_FRAME_AGE_MS:-1000}
 
-  # Голос: VAD и эмоции по окнам (audio-analytics)
+  # Голос: VAD (энергия + Silero) и эмоции по окнам с речью (audio-analytics)
   audio-consumer:
     image: affectra-python:latest
     container_name: affectra-audio-consumer
@@ -170,6 +214,7 @@ services:
         condition: service_started
     restart: unless-stopped
     command: ["python", "audio_consumer.py"]
+    healthcheck: *ready-check
     volumes: *models
     environment:
       <<: *python-env
@@ -181,6 +226,7 @@ services:
       AUDIO_WINDOW_MS:       ${AUDIO_WINDOW_MS:-3000}
       AUDIO_HOP_MS:          ${AUDIO_HOP_MS:-1000}
       VAD_THRESHOLD:         ${VAD_THRESHOLD:-0.3}
+      VAD_BACKEND:           ${VAD_BACKEND:-silero}
       MAX_CHUNK_AGE_MS:      ${MAX_CHUNK_AGE_MS:-2000}
 
   # Слияние лица и голоса (fused-analytics), слитые таймсерии и голос сессий в БД
@@ -195,6 +241,7 @@ services:
         condition: service_started
     restart: unless-stopped
     command: ["python", "fusion_consumer.py"]
+    healthcheck: *ready-check
     volumes: *models
     environment:
       <<: [*python-env, *db-env]
@@ -216,12 +263,14 @@ services:
         condition: service_started
     restart: unless-stopped
     command: ["python", "visualizer.py"]
+    healthcheck: *ready-check
     environment:
-      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP:-kafka:29092}
       OPENCV_NUM_THREADS:      "1"
       TOPIC_RAW:               raw-video-frames
       TOPIC_ANALYTICS:         fused-analytics
       TOPIC_ANNOTATED:         annotated-video
+      HEALTH_FILE:             /tmp/affectra-ready
 
   # Итоговая запись после сессии: видео с рамками слитых эмоций и звуком, аналитика JSON -> S3
   archiver:
@@ -237,6 +286,7 @@ services:
         condition: service_started
     restart: unless-stopped
     command: ["python", "archiver.py"]
+    healthcheck: *ready-check
     environment:
       <<: [*python-env, *db-env, *s3-env]
       TOPIC_RAW:                 raw-video-frames
@@ -265,11 +315,16 @@ services:
     environment:
       <<: *s3-env
       OPENCV_NUM_THREADS:            "1"
-      AFFECTRA_KAFKA:                kafka:29092
+      AFFECTRA_KAFKA:                ${KAFKA_BOOTSTRAP:-kafka:29092}
       AFFECTRA_TOPIC_RAW:            raw-video-frames
       AFFECTRA_TOPIC_AUDIO_RAW:      raw-audio-chunks
       AFFECTRA_TOPIC_SESSION_EVENTS: session-events
       AFFECTRA_TOPIC_SESSION_CONFIG: session-config
+      AFFECTRA_TOPIC_SESSION_COMMANDS: session-commands
+      AFFECTRA_TOPIC_SESSION_STATUS: session-status
+      AFFECTRA_TOPIC_SERVICE_HEALTH: service-health
+      AFFECTRA_RECORDINGS_RETENTION_DAYS: ${RECORDINGS_RETENTION_DAYS:-0}
+      AFFECTRA_UPLOADS_RETENTION_DAYS:    ${UPLOADS_RETENTION_DAYS:-0}
       AFFECTRA_TOPIC_ANALYTICS:      fused-analytics
       AFFECTRA_TOPIC_ANNOTATED:      annotated-video
       AFFECTRA_DB_HOST:              postgres
@@ -285,14 +340,23 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile
+    image: affectra-frontend:latest
     container_name: affectra-frontend
-    depends_on: [webapp]
+    depends_on: [webapp, ingest]
     restart: unless-stopped
     ports:
       - "8080:80"
+      # HTTPS: камера браузера с телефона или другого компьютера в сети — https://<IP>:8443
+      - "8443:443"
+    environment:
+      TLS_HOSTS: ${TLS_HOSTS:-}
+    volumes:
+      - frontend_certs:/etc/nginx/certs
 
 volumes:
   postgres_data:
   uploads:
   s3_data:
   archive_spool:
+  ingest_cache:
+  frontend_certs:

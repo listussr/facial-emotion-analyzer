@@ -33,3 +33,24 @@ def test_latency_window():
     assert round(s["p50"]) == 51 and round(s["p95"]) == 96 and round(s["max"]) == 100
     w.reset()
     assert len(w) == 0
+
+
+def test_staleness_warns_about_clock_skew(caplog):
+    f = StalenessFilter(max_age_ms=1000, stale_run_warn=3, warn_interval_s=0.0)
+    with caplog.at_level("WARNING", logger="staleness"):
+        assert not f.is_stale({"capture_wall_ts": 102.0}, now=100.0)
+        assert f.max_ahead_s == 2.0
+        for _ in range(3):
+            assert f.is_stale({"capture_wall_ts": 95.0}, now=100.0)
+    messages = [r.getMessage() for r in caplog.records]
+    assert len(messages) == 2
+    assert "2000 ms in the future" in messages[0] and "3 frames in a row" in messages[1]
+
+
+def test_staleness_warnings_are_rate_limited(caplog):
+    f = StalenessFilter(max_age_ms=1000, stale_run_warn=1)
+    with caplog.at_level("WARNING", logger="staleness"):
+        for _ in range(5):
+            f.is_stale({"capture_wall_ts": 0.0}, now=100.0)
+        f.is_stale({"capture_wall_ts": 99.9}, now=100.0)
+    assert len(caplog.records) == 1 and f.dropped == 5 and f._stale_run == 0

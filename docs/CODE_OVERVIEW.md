@@ -1,248 +1,234 @@
 # Обзор кодовой базы Affectra
 
-Документ — «карта» Python-кода: какие есть модули, за что каждый отвечает,
-кто кого вызывает и в каком порядке это читать. Подробности по каждому
-модулю — в [`docs/modules/`](modules/README.md).
-
-Смежные документы:
-
-- [`README.md`](../README.md) — что это за проект, как запустить, бенчмарки.
-- [`docs/ARCHITECTURE.md`](ARCHITECTURE.md) — архитектурные решения и компромиссы.
+Карта кода для того, кто открывает репозиторий впервые: процессы, пакеты, путь данных по коду, форматы
+сообщений, конфигурация и соглашения. Архитектура и решения — в [`ARCHITECTURE.md`](ARCHITECTURE.md),
+модули подробно — в [`modules/`](modules/README.md).
 
 ---
 
-## 1. Четыре процесса и один пакет
+## 1. Процессы
 
-Весь Python-код живёт в пакете `src/`, а запускается через четыре тонких
-entry point-а в корне репозитория:
-
-| Скрипт | Что поднимает | Модуль |
+| Точка входа | Сервис в compose | Что запускает |
 |---|---|---|
-| [`consumer.py`](../consumer.py) | `ProcessingPipeline` — детекция → трекинг → идентификация → эмоции | `src/frames_processing` |
-| [`visualizer.py`](../visualizer.py) | `VideoAnnotator` — рисует рамки и подписи на кадрах | `src/video_annotating` |
-| [`webapp.py`](../webapp.py) | FastAPI-приложение (uvicorn, порт 8000) | `src/web_server` |
-| [`producer.py`](../producer.py) | Ручной запуск одного `CameraProducer` (для отладки) | `src/video_producing` |
+| `webapp.py` | `webapp` | FastAPI (`src/web_server`): сессии командами, загрузки, раздача в браузер |
+| `ingest.py` | `ingest` | `IngestService` — продюсеры сессий, статусы, WebSocket камеры браузера |
+| `consumer.py` | `consumer` | `ProcessingPipeline` — лица, трекинг, идентификация, эмоции лица |
+| `audio_consumer.py` | `audio-consumer` | `AudioPipeline` — VAD и эмоции голоса |
+| `fusion_consumer.py` | `fusion` | `FusionService` — слияние лица и голоса, запись слитых таймсерий |
+| `visualizer.py` | `visualizer` | `VideoAnnotator` — серверная разметка кадров |
+| `archiver.py` | `archiver` | `ArchiveService` — итоговая запись сессии в S3 |
+| `producer.py` | — | продюсер из командной строки (без веб-сервера), для отладки |
 
-В обычном режиме продюсеры создаёт не `producer.py`, а веб-сервер: на
-`POST /api/sessions/camera` он поднимает `CameraProducer` в отдельном
-потоке своего же процесса.
+Все процессы собираются в один образ `Dockerfile.python` и отличаются командой запуска. Фоновые сервисы
+(audio-consumer, visualizer, archiver) понижают свой приоритет, чтобы видеопайплайн получал CPU первым.
 
-```mermaid
-flowchart LR
-    subgraph P1["webapp.py (процесс 1)"]
-        WS[web_server]
-        CP[CameraProducer<br/>по потоку на сессию]
-    end
-    subgraph P2["consumer.py (процесс 2)"]
-        PIPE[ProcessingPipeline]
-    end
-    subgraph P3["visualizer.py (процесс 3)"]
-        ANN[VideoAnnotator]
-    end
-
-    K1[(raw-video-frames)]
-    K2[(vision-analytics)]
-    K3[(annotated-video)]
-    DB[(Postgres + pgvector)]
-
-    WS --> CP --> K1 --> PIPE --> K2
-    K1 --> ANN
-    K2 --> ANN
-    ANN --> K3 --> WS
-    K2 --> WS
-    PIPE <--> DB
-    WS <--> DB
-```
-
----
-
-## 2. Структура пакета `src/`
+## 2. Пакет `src/`
 
 ```
 src/
-├── logging_config.py          — единый setup_logger() для всех сервисов
-├── data_models/               — dataclass-описания сообщений (справочные)
-├── video_producing/           — захват видео и публикация кадров в Kafka
-│   ├── config.py              — CameraConfig (все параметры сессии)
-│   └── producer.py            — CameraProducer (поток захвата + отправка)
-├── frames_processing/         — основной конвейер обработки кадра
-│   ├── kafka_io.py            — тонкая обёртка consumer/producer
-│   ├── processing_pipline.py  — ProcessingPipeline: Stage A/B/C, кэш треков
-│   └── processing/
-│       ├── face_detection/    — MediaPipe + геометрические фильтры
-│       ├── faces_tracking/    — DeepSORT / ByteTrack за общим интерфейсом
-│       ├── face_identification/ — FaceNet-эмбеддинг + поиск в pgvector
-│       └── emotion_recognition/ — модели эмоций (ONNX/PyTorch) + сглаживание
-├── video_annotating/          — VideoAnnotator + буферы синхронизации
-├── db_managing/               — psycopg2-обёртки над таблицами
-└── web_server/                — FastAPI: sessions · uploads · stream · events · history
-    ├── routes/                — HTTP/WS-эндпоинты
-    └── services/              — менеджер сессий, диспетчеры Kafka→клиент, поиск лиц
+  ingest/                 сервис приёма: команды, продюсеры, статусы сессий, WS браузера
+  video_producing/        источники медиа и продюсер в Kafka
+    sources/              файл и поток (PyAV), вебкамера, микрофон, камера браузера
+    producer.py           CameraProducer: темп, прореживание, отправка, события сессии
+    contracts.py          VideoMessage, AudioMessage, SessionEvent (msgpack)
+  frames_processing/      видеопайплайн
+    processing/
+      face_detection/     YuNet, MediaPipe, фильтры
+      faces_tracking/     ByteTrack и DeepSORT за общим интерфейсом
+      face_identification/ FaceNet и поиск в pgvector
+      emotion_recognition/ модели эмоций по окну кадров, окна треков, сглаживание
+    processing_pipline.py ProcessingPipeline: стадии A/B/C
+    session_control.py    настройки видео по сессиям
+    stream_metrics.py     отсев устаревших сообщений, задержки
+    kafka_io.py           общий Kafka-ввод и вывод (используют и другие сервисы)
+  audio_processing/       окна звука, VAD, модели голоса, сглаживание
+  fusion/                 слияние, состояние голоса, запись таймсерий
+  session_archive/        спул, рендер mp4 и JSON, клиент S3, сервис архивации
+  session_config/         конфиги сессий в топике session-config
+  service_health/         сигналы живости сервисов (service-health) и готовность к запуску сессий
+  video_annotating/       отрисовка рамок, синхронизация кадров с аналитикой
+  emotion_kit/            инференс моделей CREMA-D и методы слияния (перенесён из проекта обучения)
+  db_managing/            схема и миграции БД, обёртки psycopg2
+  web_server/             FastAPI: роуты, сервисы, схемы
+  emotion_labels.py       единый набор из 6 классов
+  cpu_threads.py          ограничение потоков OpenCV и приоритета процессов
+  object_storage.py       клиент S3: загрузки и записи
+  logging_config.py       JSON- или цветные логи
 ```
 
-Вспомогательные скрипты — в [`scripts/`](../scripts) (бенчмарк, квантизация
-моделей, диагностика БД).
+## 3. Путь данных по коду
 
----
+### Кадр
 
-## 3. Путь одного кадра по коду
+1. `SessionManager._start` (`web_server/services/session_manager.py`) публикует конфиг сессии и команду `start`.
+2. `IngestService.start` (`ingest/service.py`) готовит источник (скачивает загрузку из S3, проверяет поток) и
+   запускает `CameraProducer`; `CameraProducer._run` открывает источник через `sources.open_source`. `FileSource` декодирует PyAV и
+   уменьшает кадр прямо в декодере, `BrowserSource` берёт кадры из WebSocket.
+3. `CameraProducer._loop` выпускает кадры в темпе реального времени (`RealtimePacer`), прореживает до
+   `frame_rate` (`FrameDecimator`) и шлёт `VideoMessage` в `raw-video-frames`.
+4. `ProcessingPipeline._stage_consume_decode` (поток A) читает сообщение и декодирует JPEG.
+5. `ProcessingPipeline._handle_frame` (поток B): детекция раз в N кадров → `tracker.update` или
+   `tracker.predict` → кроп, идентификация, кодирование кропа в фоне → `_update_track_emotion` раз в
+   `emotion_hop_ms`.
+6. `ProcessingPipeline._stage_produce` (поток C) пишет результат в `vision-analytics`.
+7. `FusionService.handle_vision` дополняет лица голосом и пишет `fused-analytics`.
+8. `EventsDispatcher` (webapp) раздаёт результат подписчикам `/api/events/{id}`; `ArchiveService`
+   складывает его в спул.
 
-```mermaid
-sequenceDiagram
-    autonumber
-    participant CP as CameraProducer
-    participant K as Kafka
-    participant A as Stage A
-    participant B as Stage B (_handle_frame)
-    participant C as Stage C
-    participant DB as Postgres
+### Аудиочанк
 
-    CP->>K: msgpack {camera_id, frame_id, frame_data, session_config}
-    K->>A: consume + cv2.imdecode
-    A->>B: in_q (maxsize=4)
-    B->>B: FaceDetector.detect
-    B->>B: tracker.update / tracker.predict
-    B->>B: FaceIdentifier.identify (в фоне)
-    B->>B: EmotionRecognizer.predict (батч) + сглаживание
-    B->>C: out_q (maxsize=4)
-    C->>K: JSON vision-analytics
-    Note over B,DB: когда трек уходит из кэша →<br/>_flush_emotion_timeseries → emotion_timeseries
-```
-
-Ключевые точки входа для чтения кода:
-
-1. [`ProcessingPipeline._handle_frame`](../src/frames_processing/processing_pipline.py) —
-   вся логика обработки одного кадра на одном экране.
-2. [`ProcessingPipeline.process`](../src/frames_processing/processing_pipline.py) —
-   как устроены три стадии и backpressure.
-3. [`CameraProducer._process_capture_loop`](../src/video_producing/producer.py) —
-   как кадры попадают в Kafka.
-4. [`web_server/main.py`](../src/web_server/main.py) — сборка API и жизненный цикл.
-
----
+1. Источник выдаёт PCM; `AudioChunker` режет его на чанки по 100 мс с `pts_ms` на часах сессии.
+2. `AudioPipeline.handle_chunk` склеивает чанки в `CameraAudioBuffer` и получает окна 3 с с шагом 1 с.
+3. `EnergyVAD`, затем `SileroVAD` оценивают долю речи; окна с речью уходят в `VoiceEmotionRecognizer`.
+4. Результат `AudioAnalytics` пишется в `audio-analytics`; `FusionService.handle_audio` добавляет его в
+   `VoiceState` камеры.
 
 ## 4. Форматы сообщений
 
-### `raw-video-frames` (msgpack, пишет `CameraProducer`)
+Все медиа и события — msgpack, аналитика — JSON. Ключ сообщения — `camera_id`.
 
-```python
-{
-  'camera_id': 'cam_ab12cd',
-  'frame_id': '175',
-  'timestamp': 1762538732.41,
-  'frame_data': b'\xff\xd8...',        # JPEG
-  'processed_width': 854, 'processed_height': 480,
-  'original_width': 1920, 'original_height': 1080,
-  'quality': 60, 'frame_rate': 20, 'format': 'jpeg',
-  'session_config': {'tracker': 'bytetrack', 'model': 'resnet-18', 'device': 'cpu'},
-}
-```
+### `raw-video-frames` (`VideoMessage`, schema 2)
 
-### `vision-analytics` (JSON, пишет `ProcessingPipeline`)
-
-```json
-{
-  "camera_id": "cam_ab12cd",
-  "frame_id": "175",
-  "faces": [
-    {
-      "bbox": [312, 88, 421, 210],
-      "track_id": 4,
-      "face_id": "3f2a...-uuid | pending-9c1f",
-      "emotion": "neutral",
-      "emotion_scores": [0.04, 0.03, 0.02, 0.05, 0.81, 0.02, 0.02, 0.01]
-    }
-  ]
-}
-```
-
-### `annotated-video` (msgpack, пишет `VideoAnnotator`)
-
-```python
-{'camera_id': 'cam_ab12cd', 'frame_id': '175', 'annotated_frame': b'\xff\xd8...'}
-```
-
-Порядок вероятностей везде один и тот же —
-`EMOTION_LABELS` из [`pipeline_utils.py`](../src/frames_processing/processing/emotion_recognition/pipeline_utils.py):
-
-```
-anger, contempt, disgust, fear, happy, neutral, sad, surprise
-```
-
----
-
-## 5. Схема базы данных
-
-```sql
-face_embeddings(id, user_id UUID UNIQUE, embedding vector(512),
-                first_seen timestamptz, face_image bytea)
-emotion_timeseries(id, user_id UUID → face_embeddings.user_id,
-                   data JSONB, created_at timestamptz)
-```
-
-`data` — один трек целиком:
-
-```json
-{
-  "camera_id": "upload_8922b7", "track_id": 12,
-  "started_at": 1762538732.41, "ended_at": 1762538745.18,
-  "samples": [{"t": 1762538733.22, "label": "neutral", "scores": [ ... 8 ... ]}]
-}
-```
-
-DDL — в [`faces_emotions_database/init.sql`](../faces_emotions_database/init.sql).
-
----
-
-## 6. Конфигурация через переменные окружения
-
-| Переменная | Кто читает | Default |
+| Поле | Тип | Смысл |
 |---|---|---|
-| `KAFKA_BOOTSTRAP_SERVERS` | `consumer.py`, `visualizer.py` | `localhost:9092` |
-| `TOPIC_RAW` / `TOPIC_ANALYTICS` / `TOPIC_ANNOTATED` | `consumer.py`, `visualizer.py` | `raw-video-frames` / `vision-analytics` / `annotated-video` |
-| `PIPELINE_GROUP_ID` | `consumer.py` | `emotion-pipeline-v1` |
-| `DETECTOR_MIN_CONF` | `consumer.py` | `0.8` |
-| `EMOTION_MODEL_DEFAULT` / `EMOTION_DEVICE_DEFAULT` / `EMOTION_NUM_THREADS` | `consumer.py` | `resnet-18` / `cpu` / `4` |
-| `TRACKER_DEFAULT` | `consumer.py` | `bytetrack` |
-| `DETECTION_FREQUENCY` | `consumer.py` | `1` |
-| `IDENTIFIER_THRESHOLD` | `consumer.py` | `0.4` |
-| `DB_HOST` / `DB_PORT` / `DB_NAME` / `DB_USER` / `DB_PASSWORD` | `consumer.py` | `localhost` / `5433` / `emotions` / `app_user` / `basic_app_password` |
-| `AFFECTRA_KAFKA`, `AFFECTRA_TOPIC_*`, `AFFECTRA_DB_*` | `web_server/config.py` | см. [`config.py`](../src/web_server/config.py) |
-| `LOG_LEVEL` | `logging_config.py` | `INFO` |
+| `camera_id`, `seq`, `pts_ms` | str, int, int | сессия, номер кадра, время от начала сессии |
+| `modalities` | list | что реально передаёт сессия |
+| `capture_wall_ts`, `session_start_wall_ts` | float | время захвата и начала сессии (Unix) |
+| `frame_data` | bytes | JPEG |
+| `frame_rate`, `quality` | int | целевая частота и качество JPEG |
+| `processed_width/height`, `original_width/height` | int | размеры после уменьшения и исходные |
+| `frame_id`, `timestamp` | str, float | поля для аннотатора, сохранены для совместимости |
 
-Шаблон — [`.env.example`](../.env.example); значения для контейнеров —
-в [`docker-compose.yml`](../docker-compose.yml).
+### `raw-audio-chunks` (`AudioMessage`)
 
----
+Общие поля как у кадра, плюс `audio_data` (PCM s16le interleaved), `sample_rate` (16000), `channels` (1),
+`num_samples` (на канал), `duration_ms`.
+
+### `session-events` (`SessionEvent`)
+
+`event` — `stream_start` или `stream_end`; `modalities` и `requested_modalities`; `degraded` — источник
+не дал часть запрошенного; `is_live`; параметры потоков `video`/`audio`. У `stream_end` есть `reason`
+(`eof`, `stopped`, `error`), `last_pts_ms` и `sent` по потокам.
+
+### `session-config` (`SessionConfig`, schema 1)
+
+```json
+{
+  "camera_id": "upload_1e3934", "revision": 1792755200000000000, "updated_at": 1792755200.0,
+  "vision": {"tracker": "bytetrack", "model": "crema-swin-int8", "device": "cpu",
+             "clip_frames": 8, "emotion_hop_ms": null, "detection_frequency": null, "identification": true},
+  "audio":  {"model": "crema-wavlm-int8", "device": "cpu", "vad_threshold": null, "window_ms": null, "hop_ms": null},
+  "fusion": {"method": "stack_hidden", "voice_max_age_ms": null, "min_overlap_ms": null}
+}
+```
+
+`null` — значение по умолчанию сервиса. Удаление конфига — tombstone (пустое значение).
+
+### `session-commands` и `session-status` (`ingest/contracts.py`)
+
+Команда — `{action: "start" | "stop", camera_id, issued_at, spec}`, где `spec` — `SessionSpec` (тип, имя, источник
+или ключ загрузки, частота и размер кадра, модальности, настройки API для показа). Статус —
+`{camera_id, state, spec, stats, frames_sent, errors, error, ingest_id, updated_at, ended_at}`, `state` —
+`starting`, `live`, `running`, `done`, `offline` или `error`.
+
+### `vision-analytics` (schema 2)
+
+```json
+{
+  "camera_id": "upload_1e3934", "frame_id": "120", "seq": 120, "pts_ms": 6000,
+  "capture_wall_ts": 1792755206.1, "processed_wall_ts": 1792755206.15,
+  "label_set": "crema-d-6", "emotion_labels": ["anger", "disgust", "fear", "happy", "neutral", "sad"],
+  "faces": [{
+    "bbox": [x1, y1, x2, y2], "track_id": 1, "face_id": "uuid или pending-…",
+    "emotion": "happy", "emotion_scores": [6 чисел], "predicted": false, "window_seq": 4,
+    "emotion_window": {"seq": 4, "start_pts_ms": 3000, "end_pts_ms": 6000, "frames": 8, "model": "crema-swin-int8",
+                       "logits": [6], "probs": [6], "emb": [256]}
+  }]
+}
+```
+
+`emotion` равно `null`, если оценки ещё нет или уверенность ниже порога. `predicted = true` — рамка
+спрогнозирована трекером без детекции. `emotion_window` есть только на кадре, где посчитано новое окно.
+
+### `audio-analytics` (schema 2)
+
+`window_seq`, `pts_start_ms`, `pts_end_ms`, `speech_prob`, `is_speech`; при речи — `scores`, `label`,
+`logits`, `emb`; всегда — сглаженные `smoothed_scores` и `smoothed_label`, а также `model`.
+
+### `fused-analytics`
+
+Сообщение `vision-analytics` без `emotion_window`, где у каждого лица добавлены:
+
+| Поле | Смысл |
+|---|---|
+| `emotion`, `emotion_scores` | итог после слияния и сглаживания |
+| `face_emotion`, `face_scores` | только лицо |
+| `voice_attributed`, `voice_emotion`, `voice_scores`, `voice_age_ms` | голос, приписанный лицу |
+| `fusion_used`, `fusion_seq` | что реально слито и номер слияния трека |
+
+На уровне кадра: `fusion` (метод, режим `single_face` / `multi_face` / `no_face`, параметры),
+`scene_voice` (последняя оценка голоса сцены: `label`, `scores`, `age_ms`, `speech_prob`, `speaking`) и
+`fused_wall_ts`.
+
+### WebSocket браузера
+
+| Канал | Направление | Формат |
+|---|---|---|
+| `/api/live/{id}` | сервер → браузер | `[uint32 BE длина заголовка][JSON {pts_ms, seq, frame_id, capture_wall_ts, width, height}][JPEG]` |
+| `/api/events/{id}` | сервер → браузер | JSON `{"kind": "analytics", "data": <fused-analytics>}`, раз в 15 с `{"kind": "ping"}` |
+| `/api/capture/{id}` | браузер → сервер | `[uint8 тип][uint32 BE pts_ms][данные]`: тип 1 — JPEG кадра, 2 — PCM s16le 16 кГц моно |
+
+## 5. База данных
+
+Таблицы и миграции — в [`modules/db_managing.md`](modules/db_managing.md). Запись `emotion_timeseries.data`:
+
+```json
+{
+  "camera_id": "upload_1e3934", "track_id": 1, "modality": "face",
+  "started_at": 1792755203.2, "ended_at": 1792755230.0,
+  "label_set": "crema-d-6", "labels": ["anger", "disgust", "fear", "happy", "neutral", "sad"],
+  "samples": [{"t": 1792755206.2, "label": "happy", "scores": [6 чисел]}]
+}
+```
+
+Записи старых моделей (`label_set = legacy-8`) остаются читаемыми: порядок классов берётся из
+`labels` или из `LEGACY_LABELS`.
+
+## 6. Конфигурация
+
+Значения по умолчанию — в `docker-compose.yml` и `.env.example`; для нескольких машин — `deploy/docker-stack.yml`
+(см. [DEPLOYMENT.md](DEPLOYMENT.md)). Главное:
+
+| Сервис | Переменные |
+|---|---|
+| все | `KAFKA_BOOTSTRAP_SERVERS`, `TOPIC_*`, `OPENCV_NUM_THREADS`, `PROCESS_PRIORITY`, `HEARTBEAT_INTERVAL_S`, `HEALTH_FILE` |
+| consumer | `EMOTION_MODEL_DEFAULT`, `EMOTION_NUM_THREADS`, `DETECTOR_BACKEND`, `DETECTOR_MIN_CONF`, `DETECTOR_MAX_SIDE`, `DETECTION_FREQUENCY`, `CLIP_FRAMES`, `EMOTION_HOP_MS`, `CLIP_WINDOW_MS`, `TRACKER_DEFAULT`, `IDENTIFICATION_ENABLED`, `IDENTIFIER_THRESHOLD`, `MAX_FRAME_AGE_MS`, `DB_*` |
+| audio-consumer | `VOICE_MODEL_DEFAULT`, `VOICE_NUM_THREADS`, `AUDIO_WINDOW_MS`, `AUDIO_HOP_MS`, `VAD_THRESHOLD`, `VAD_THRESHOLD_DBFS`, `VAD_BACKEND`, `VAD_MODEL_PATH`, `VAD_FRAME_THRESHOLD`, `MAX_CHUNK_AGE_MS` |
+| fusion | `FUSION_METHOD`, `FUSION_VOICE_MAX_AGE_MS`, `FUSION_MIN_OVERLAP_MS`, `FUSION_DB_ENABLED`, `FUSION_TRACK_TIMEOUT_S`, `DB_*` |
+| archiver | `ARCHIVE_SPOOL_DIR`, `ARCHIVE_ANALYTICS_GRACE_S`, `ARCHIVE_IDLE_TIMEOUT_S`, `ARCHIVE_MAX_DURATION_S`, `ARCHIVE_RENDER_THREADS`, `S3_*`, `DB_*` |
+| webapp | `AFFECTRA_KAFKA`, `AFFECTRA_TOPIC_*`, `AFFECTRA_DB_*`, `AFFECTRA_REQUIRE_READY`, `S3_*` |
+| ingest | `TOPIC_SESSION_COMMANDS`, `TOPIC_SESSION_STATUS`, `INGEST_GROUP_ID`, `INGEST_CACHE_DIR`, `INGEST_PORT`, `INGEST_ADVERTISED_ADDRESS`, `S3_*` |
+| модели | `CREMA_MODELS_DIR` — каталог моделей CREMA-D (по умолчанию `models/crema`) |
 
 ## 7. Соглашения в коде
 
-- **Приватность по подчёркиванию.** `_имя` — внутреннее; наружу модуль
-  отдаёт только то, что перечислено в `__all__` его `__init__.py`.
-- **Фабрики вместо наследования на местах вызова.** `get_tracker(settings)`,
-  `EmotionRecognizer(model, device)`, `get_emotion_smoothing_strategy(name)` —
-  алгоритм выбирается строкой из конфига, вызывающий код о реализациях не знает.
-- **Тяжёлое — в фоне.** Обращения к БД и FaceNet уходят в
-  `ThreadPoolExecutor`; горячий путь кадра их не ждёт.
-- **Ограниченные очереди.** Везде, где есть producer/consumer внутри
-  процесса, очередь ограничена: либо блокировка (backpressure в пайплайне),
-  либо выбрасывание самого старого элемента (стриминг в UI).
-- **Логи.** Все сервисы зовут `setup_logger(<имя>)`; в контейнерах формат
-  JSON, локально у веб-сервера — цветной текст.
-- **Кириллица в докстрингах.** Стиль смешанный (`:param:` и Google-style
-  `Args:`) — это осознанно оставлено как есть, чтобы не переписывать
-  историю; ориентироваться следует на текст, а не на формат.
-
----
+- Модульный докстринг — одна строка. Докстринги функций в стиле Google: краткое описание, `Args:` с
+  выровненными колонками `имя (тип): описание`, `Raises:`, `Returns:`. Тривиальные методы без докстрингов.
+- Комментарии — только там, где без них неясно «почему».
+- Импорты: сначала `import x`, затем `from` стандартной библиотеки, затем сторонние пакеты, затем свои;
+  одно имя на строку.
+- Подряд идущие однострочные присваивания выравниваются по `=`.
+- Сообщения Kafka — dataclass-контракты с `schema_version`; при чтении неизвестные поля игнорируются,
+  чтобы новые поля не ломали старых потребителей.
+- Сервис можно запустить без Kafka: `handle_*` вызываются напрямую — на этом построены тесты.
+- `src/emotion_kit` перенесён из проекта обучения без изменений стиля, чтобы его было проще обновлять.
 
 ## 8. С чего начать чтение
 
-| Задача | Куда смотреть |
-|---|---|
-| Понять систему целиком | [`README.md`](../README.md) → [`ARCHITECTURE.md`](ARCHITECTURE.md) |
-| Добавить/заменить алгоритм трекинга | [`modules/faces_tracking.md`](modules/faces_tracking.md) |
-| Добавить новую модель эмоций | [`modules/emotion_recognition.md`](modules/emotion_recognition.md) |
-| Разобраться, откуда берётся `face_id` | [`modules/face_identification.md`](modules/face_identification.md) |
-| Поправить API или добавить эндпоинт | [`modules/web_server.md`](modules/web_server.md) |
-| Понять, что и когда пишется в БД | [`modules/db_managing.md`](modules/db_managing.md) |
-| Измерить производительность | [`modules/scripts.md`](modules/scripts.md) |
+1. `src/video_producing/contracts.py` и `src/session_config/contracts.py` — что ходит по топикам.
+2. `src/frames_processing/processing_pipline.py`, метод `_handle_frame` — обработка кадра.
+3. `src/audio_processing/pipeline.py`, метод `handle_chunk` — обработка звука.
+4. `src/fusion/service.py`, методы `handle_vision` и `_fuse_track` — слияние.
+5. `src/session_archive/service.py` — итоговая запись.
+6. `src/web_server/services/session_manager.py` и `src/ingest/service.py` — как запускаются сессии.
+7. `frontend/src/pages/HomePage.tsx` и `SessionPage.tsx` — интерфейс.

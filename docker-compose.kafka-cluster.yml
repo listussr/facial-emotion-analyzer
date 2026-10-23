@@ -1,0 +1,114 @@
+# Kafka из трёх узлов (брокер + контроллер KRaft в каждом) с репликацией топиков, поверх docker-compose.yml:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.kafka-cluster.yml up -d
+#
+# Топики создаются с replication.factor=3 и min.insync.replicas=2: при падении одного узла запись с acks=all
+# (конфиги, команды, события сессий) и чтение продолжаются, кворум контроллеров (2 из 3) сохраняется.
+# Брокеры с хоста: localhost:9092, localhost:9093, localhost:9094.
+# Если кластер уже поднимался с одним брокером, сначала docker compose down: топики пересоздаются с репликацией.
+
+x-cluster-bootstrap: &bootstrap
+  KAFKA_BOOTSTRAP_SERVERS: kafka:29092,kafka-2:29092,kafka-3:29092
+
+x-kafka-node: &kafka-node
+  image: confluentinc/cp-kafka:7.4.0
+  restart: unless-stopped
+  healthcheck:
+    test: ["CMD", "kafka-topics", "--bootstrap-server", "localhost:29092", "--list"]
+    interval: 5s
+    timeout: 10s
+    retries: 30
+
+x-kafka-env: &kafka-env
+  CLUSTER_ID: ${KAFKA_CLUSTER_ID:-YWZmZWN0cmEta2Fma2EtMQ}
+  KAFKA_PROCESS_ROLES: broker,controller
+  KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:29093,2@kafka-2:29093,3@kafka-3:29093
+  KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+  KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT_INTERNAL:PLAINTEXT,PLAINTEXT_EXTERNAL:PLAINTEXT
+  KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT_INTERNAL
+  KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 3
+  KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 3
+  KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 2
+  KAFKA_DEFAULT_REPLICATION_FACTOR: 3
+  KAFKA_MIN_INSYNC_REPLICAS: 2
+  KAFKA_MESSAGE_MAX_BYTES: 10485760
+  KAFKA_REPLICA_FETCH_MAX_BYTES: 10485760
+  KAFKA_HEAP_OPTS: ${KAFKA_HEAP_OPTS:--Xms256m -Xmx512m}
+  KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+
+services:
+
+  kafka:
+    environment:
+      <<: *kafka-env
+      KAFKA_NODE_ID: 1
+    volumes:
+      - kafka_1_data:/var/lib/kafka/data
+
+  kafka-2:
+    <<: *kafka-node
+    container_name: affectra-kafka-2
+    ports:
+      - "9093:9093"
+    environment:
+      <<: *kafka-env
+      KAFKA_NODE_ID: 2
+      KAFKA_LISTENERS: PLAINTEXT_INTERNAL://0.0.0.0:29092,CONTROLLER://0.0.0.0:29093,PLAINTEXT_EXTERNAL://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT_INTERNAL://kafka-2:29092,PLAINTEXT_EXTERNAL://${KAFKA_EXTERNAL_HOST:-localhost}:9093
+    volumes:
+      - kafka_2_data:/var/lib/kafka/data
+
+  kafka-3:
+    <<: *kafka-node
+    container_name: affectra-kafka-3
+    ports:
+      - "9094:9094"
+    environment:
+      <<: *kafka-env
+      KAFKA_NODE_ID: 3
+      KAFKA_LISTENERS: PLAINTEXT_INTERNAL://0.0.0.0:29092,CONTROLLER://0.0.0.0:29093,PLAINTEXT_EXTERNAL://0.0.0.0:9094
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT_INTERNAL://kafka-3:29092,PLAINTEXT_EXTERNAL://${KAFKA_EXTERNAL_HOST:-localhost}:9094
+    volumes:
+      - kafka_3_data:/var/lib/kafka/data
+
+  topics-init:
+    depends_on:
+      kafka-2:
+        condition: service_healthy
+      kafka-3:
+        condition: service_healthy
+    environment:
+      BOOTSTRAP:   kafka:29092,kafka-2:29092,kafka-3:29092
+      REPLICATION: "3"
+      MIN_ISR:     "2"
+
+  kafka-ui:
+    environment:
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092,kafka-2:29092,kafka-3:29092
+
+  ingest:
+    environment: *bootstrap
+
+  consumer:
+    environment: *bootstrap
+
+  audio-consumer:
+    environment: *bootstrap
+
+  fusion:
+    environment: *bootstrap
+
+  visualizer:
+    environment: *bootstrap
+
+  archiver:
+    environment: *bootstrap
+
+  webapp:
+    environment:
+      AFFECTRA_KAFKA: kafka:29092,kafka-2:29092,kafka-3:29092
+
+volumes:
+  kafka_1_data:
+  kafka_2_data:
+  kafka_3_data:

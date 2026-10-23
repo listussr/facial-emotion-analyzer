@@ -79,6 +79,7 @@ class SessionInfo(BaseModel):
     modalities: List[Modality] = []
     degraded: bool = False
     audio_seconds_sent: float = 0.0
+    error: Optional[str] = None
 
 
 class UploadInfo(BaseModel):
@@ -92,11 +93,38 @@ class UploadInfo(BaseModel):
     duration_sec: Optional[float] = None
 
 
+class StorageUsage(BaseModel):
+    """Объём одного вида данных; retention_days — срок автоочистки, 0 — хранятся всегда."""
+    count: int
+    size_bytes: int
+    retention_days: float
+
+
+class StorageInfo(BaseModel):
+    recordings: StorageUsage
+    uploads: StorageUsage
+
+
+class ServiceHealthInfo(BaseModel):
+    """Экземпляры сервиса: ready — обрабатывают, starting — загружают модели, stale — давно не отвечали."""
+    title: str
+    ready: int
+    starting: int
+    stale: int
+
+
 class HealthInfo(BaseModel):
+    """
+    Состояние системы. services и ready_for — по сигналам сервисов (None, пока они не прочитаны);
+    ready_for[modality] — можно ли запускать анализ этой модальности, not_ready — причины, если нельзя.
+    """
     status: str
     kafka: bool
     sessions: int
     uploads_dir: str
+    services: Optional[Dict[str, ServiceHealthInfo]] = None
+    ready_for: Optional[Dict[str, bool]] = None
+    not_ready: List[str] = []
 
 
 class RecordingInfo(BaseModel):

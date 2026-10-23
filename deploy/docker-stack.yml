@@ -1,0 +1,365 @@
+# Affectra в Docker Swarm на нескольких машинах. Подготовка и запуск — docs/DEPLOYMENT.md:
+#
+#   set -a; . ./.env; set +a
+#   docker stack deploy -c deploy/docker-stack.yml affectra
+#
+# Узлы выбираются метками (docker node update --label-add ...):
+#   affectra.kafka=1|2|3   — по одному брокеру Kafka (KRaft) на узел
+#   affectra.core=true     — postgres, s3, webapp, frontend
+#   affectra.ingest=true   — узлы приёма медиа
+#   affectra.compute=true  — обработка: лицо, голос, слияние, разметка, итоговые записи
+# Одна машина со всеми метками тоже подходит.
+
+version: "3.8"
+
+x-image: &python-image ${REGISTRY:-127.0.0.1:5000}/affectra-python:${TAG:-latest}
+
+x-kafka-servers: &kafka-servers kafka-1:29092,kafka-2:29092,kafka-3:29092
+
+x-python-env: &python-env
+  KAFKA_BOOTSTRAP_SERVERS: *kafka-servers
+  TOPIC_SESSION_EVENTS:    session-events
+  TOPIC_SESSION_CONFIG:    session-config
+  OPENCV_NUM_THREADS:      "1"
+  HEALTH_FILE:             /tmp/affectra-ready
+
+x-db-env: &db-env
+  DB_HOST:     postgres
+  DB_PORT:     "5432"
+  DB_NAME:     ${DB_NAME:-emotions}
+  DB_USER:     ${DB_USER:-app_user}
+  DB_PASSWORD: ${DB_PASSWORD:-basic_app_password}
+
+x-s3-env: &s3-env
+  S3_ENDPOINT:   http://s3:8333
+  S3_ACCESS_KEY: ${S3_ACCESS_KEY:-affectra}
+  S3_SECRET_KEY: ${S3_SECRET_KEY:-affectra-secret}
+  S3_BUCKET:     ${S3_BUCKET:-affectra-recordings}
+
+# Сервис готов, пока обновляет файл готовности (модели загружены, сигнал в service-health идёт)
+x-ready-check: &ready-check
+  test: ["CMD", "python", "-c", "import os, sys, time; sys.exit(time.time() - os.path.getmtime('/tmp/affectra-ready') > 30)"]
+  interval: 10s
+  timeout: 5s
+  retries: 3
+  start_period: 300s
+
+x-models: &models
+  - ${MODELS_DIR:-/opt/affectra/models/crema}:/app/models/crema:ro
+
+x-restart: &restart
+  restart_policy:
+    condition: any
+    delay: 5s
+
+x-kafka-env: &kafka-env
+  CLUSTER_ID: ${KAFKA_CLUSTER_ID:-YWZmZWN0cmEta2Fma2EtMQ}
+  KAFKA_PROCESS_ROLES: broker,controller
+  KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka-1:29093,2@kafka-2:29093,3@kafka-3:29093
+  KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+  KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+  KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:29092,CONTROLLER://0.0.0.0:29093
+  KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+  KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 3
+  KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 3
+  KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 2
+  KAFKA_DEFAULT_REPLICATION_FACTOR: 3
+  KAFKA_MIN_INSYNC_REPLICAS: 2
+  KAFKA_MESSAGE_MAX_BYTES: 10485760
+  KAFKA_REPLICA_FETCH_MAX_BYTES: 10485760
+  KAFKA_HEAP_OPTS: ${KAFKA_HEAP_OPTS:--Xms512m -Xmx1g}
+  KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+
+networks:
+  affectra:
+    driver: overlay
+    attachable: true
+
+services:
+
+  # Брокеры с постоянными именами и без VIP (dnsrr): клиенты держат долгие соединения с конкретным брокером
+  kafka-1:
+    image: confluentinc/cp-kafka:7.4.0
+    hostname: kafka-1
+    networks: [affectra]
+    environment:
+      <<: *kafka-env
+      KAFKA_NODE_ID: 1
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-1:29092
+    volumes:
+      - kafka_1_data:/var/lib/kafka/data
+    deploy:
+      <<: *restart
+      endpoint_mode: dnsrr
+      placement:
+        constraints: [node.labels.affectra.kafka == 1]
+
+  kafka-2:
+    image: confluentinc/cp-kafka:7.4.0
+    hostname: kafka-2
+    networks: [affectra]
+    environment:
+      <<: *kafka-env
+      KAFKA_NODE_ID: 2
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-2:29092
+    volumes:
+      - kafka_2_data:/var/lib/kafka/data
+    deploy:
+      <<: *restart
+      endpoint_mode: dnsrr
+      placement:
+        constraints: [node.labels.affectra.kafka == 2]
+
+  kafka-3:
+    image: confluentinc/cp-kafka:7.4.0
+    hostname: kafka-3
+    networks: [affectra]
+    environment:
+      <<: *kafka-env
+      KAFKA_NODE_ID: 3
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-3:29092
+    volumes:
+      - kafka_3_data:/var/lib/kafka/data
+    deploy:
+      <<: *restart
+      endpoint_mode: dnsrr
+      placement:
+        constraints: [node.labels.affectra.kafka == 3]
+
+  # Swarm не ждёт зависимостей: задача повторяется, пока все три брокера не примут создание топиков
+  topics-init:
+    image: confluentinc/cp-kafka:7.4.0
+    networks: [affectra]
+    environment:
+      BOOTSTRAP:   *kafka-servers
+      PARTITIONS:  ${TOPIC_PARTITIONS:-4}
+      REPLICATION: "3"
+      MIN_ISR:     "2"
+    entrypoint: ["bash", "-c"]
+    command:
+      - |
+        set -e
+        B=$$BOOTSTRAP
+        create() { kafka-topics --bootstrap-server $$B --create --if-not-exists --topic "$$1" --partitions "$$PARTITIONS" --replication-factor "$$REPLICATION" --config min.insync.replicas=$$MIN_ISR $${2:+--config} $${2:-} $${3:+--config} $${3:-} $${4:+--config} $${4:-}; }
+        create raw-video-frames retention.ms=1800000
+        create raw-audio-chunks retention.ms=1800000
+        create annotated-video  retention.ms=1800000
+        create session-events
+        create vision-analytics
+        create audio-analytics
+        create fused-analytics
+        create session-config cleanup.policy=compact segment.ms=3600000 min.cleanable.dirty.ratio=0.1
+        create session-status cleanup.policy=compact segment.ms=600000 min.cleanable.dirty.ratio=0.1
+        create session-commands retention.ms=3600000
+        create service-health   cleanup.policy=compact segment.ms=600000 min.cleanable.dirty.ratio=0.1
+        kafka-topics --bootstrap-server $$B --list
+    deploy:
+      restart_policy:
+        condition: on-failure
+        delay: 10s
+
+  postgres:
+    image: ${REGISTRY:-127.0.0.1:5000}/affectra-postgres:${TAG:-latest}
+    networks: [affectra]
+    environment:
+      POSTGRES_DB:       ${DB_NAME:-emotions}
+      POSTGRES_USER:     ${DB_USER:-app_user}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-basic_app_password}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    deploy:
+      <<: *restart
+      placement:
+        constraints: [node.labels.affectra.core == true]
+
+  s3:
+    image: chrislusf/seaweedfs:4.48
+    networks: [affectra]
+    command: ["server", "-dir=/data", "-s3", "-s3.port=8333"]
+    environment:
+      AWS_ACCESS_KEY_ID:     ${S3_ACCESS_KEY:-affectra}
+      AWS_SECRET_ACCESS_KEY: ${S3_SECRET_KEY:-affectra-secret}
+    volumes:
+      - s3_data:/data
+    deploy:
+      <<: *restart
+      placement:
+        constraints: [node.labels.affectra.core == true]
+
+  # Узлы приёма делят сессии по партициям session-commands; WebSocket браузера пересылается владельцу сессии
+  ingest:
+    image: *python-image
+    networks: [affectra]
+    command: ["python", "ingest.py"]
+    healthcheck: *ready-check
+    environment:
+      <<: [*python-env, *s3-env]
+      TOPIC_RAW:              raw-video-frames
+      TOPIC_AUDIO_RAW:        raw-audio-chunks
+      TOPIC_SESSION_COMMANDS: session-commands
+      TOPIC_SESSION_STATUS:   session-status
+      INGEST_CACHE_DIR:       /app/data/ingest_cache
+    volumes:
+      - ingest_cache:/app/data/ingest_cache
+    deploy:
+      <<: *restart
+      replicas: ${INGEST_REPLICAS:-2}
+      placement:
+        constraints: [node.labels.affectra.ingest == true]
+
+  # Экземпляры делят партиции топиков; сессия целиком обрабатывается одним экземпляром
+  consumer:
+    image: *python-image
+    networks: [affectra]
+    command: ["python", "consumer.py"]
+    healthcheck: *ready-check
+    volumes: *models
+    environment:
+      <<: [*python-env, *db-env]
+      TOPIC_RAW:              raw-video-frames
+      TOPIC_ANALYTICS:        vision-analytics
+      EMOTION_MODEL_DEFAULT:  ${EMOTION_MODEL_DEFAULT:-crema-swin-int8}
+      EMOTION_DEVICE_DEFAULT: cpu
+      EMOTION_NUM_THREADS:    ${EMOTION_NUM_THREADS:-2}
+      DETECTOR_BACKEND:       ${DETECTOR_BACKEND:-yunet}
+      DETECTION_FREQUENCY:    ${DETECTION_FREQUENCY:-2}
+      CLIP_FRAMES:            ${CLIP_FRAMES:-8}
+      TRACKER_DEFAULT:        ${TRACKER_DEFAULT:-bytetrack}
+      IDENTIFICATION_ENABLED: ${IDENTIFICATION_ENABLED:-true}
+      MAX_FRAME_AGE_MS:       ${MAX_FRAME_AGE_MS:-1000}
+    deploy:
+      <<: *restart
+      replicas: ${CONSUMER_REPLICAS:-1}
+      placement:
+        constraints: [node.labels.affectra.compute == true]
+
+  audio-consumer:
+    image: *python-image
+    networks: [affectra]
+    command: ["python", "audio_consumer.py"]
+    healthcheck: *ready-check
+    volumes: *models
+    environment:
+      <<: *python-env
+      TOPIC_AUDIO_RAW:       raw-audio-chunks
+      TOPIC_AUDIO_ANALYTICS: audio-analytics
+      VOICE_MODEL_DEFAULT:   ${VOICE_MODEL_DEFAULT:-crema-wavlm-int8}
+      VOICE_DEVICE_DEFAULT:  cpu
+      VOICE_NUM_THREADS:     ${VOICE_NUM_THREADS:-2}
+      VAD_BACKEND:           ${VAD_BACKEND:-silero}
+      MAX_CHUNK_AGE_MS:      ${MAX_CHUNK_AGE_MS:-2000}
+    deploy:
+      <<: *restart
+      replicas: ${AUDIO_CONSUMER_REPLICAS:-1}
+      placement:
+        constraints: [node.labels.affectra.compute == true]
+
+  fusion:
+    image: *python-image
+    networks: [affectra]
+    command: ["python", "fusion_consumer.py"]
+    healthcheck: *ready-check
+    volumes: *models
+    environment:
+      <<: [*python-env, *db-env]
+      TOPIC_ANALYTICS:       vision-analytics
+      TOPIC_AUDIO_ANALYTICS: audio-analytics
+      TOPIC_FUSED:           fused-analytics
+      FUSION_METHOD:         ${FUSION_METHOD:-stack_hidden}
+      FUSION_DB_ENABLED:     ${FUSION_DB_ENABLED:-true}
+    deploy:
+      <<: *restart
+      placement:
+        constraints: [node.labels.affectra.compute == true]
+
+  visualizer:
+    image: *python-image
+    networks: [affectra]
+    command: ["python", "visualizer.py"]
+    healthcheck: *ready-check
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: *kafka-servers
+      OPENCV_NUM_THREADS:      "1"
+      TOPIC_RAW:               raw-video-frames
+      TOPIC_ANALYTICS:         fused-analytics
+      TOPIC_ANNOTATED:         annotated-video
+      HEALTH_FILE:             /tmp/affectra-ready
+    deploy:
+      <<: *restart
+      placement:
+        constraints: [node.labels.affectra.compute == true]
+
+  archiver:
+    image: *python-image
+    networks: [affectra]
+    command: ["python", "archiver.py"]
+    healthcheck: *ready-check
+    environment:
+      <<: [*python-env, *db-env, *s3-env]
+      TOPIC_RAW:              raw-video-frames
+      TOPIC_AUDIO_RAW:        raw-audio-chunks
+      TOPIC_FUSED:            fused-analytics
+      ARCHIVE_SPOOL_DIR:      /app/data/archive_spool
+      ARCHIVE_MAX_DURATION_S: ${ARCHIVE_MAX_DURATION_S:-1800}
+      ARCHIVE_RENDER_THREADS: ${ARCHIVE_RENDER_THREADS:-2}
+    volumes:
+      - archive_spool:/app/data/archive_spool
+    deploy:
+      <<: *restart
+      placement:
+        constraints: [node.labels.affectra.compute == true]
+
+  webapp:
+    image: *python-image
+    networks: [affectra]
+    command: ["python", "webapp.py"]
+    volumes: *models
+    environment:
+      <<: *s3-env
+      OPENCV_NUM_THREADS:              "1"
+      AFFECTRA_KAFKA:                  *kafka-servers
+      AFFECTRA_TOPIC_RAW:              raw-video-frames
+      AFFECTRA_TOPIC_AUDIO_RAW:        raw-audio-chunks
+      AFFECTRA_TOPIC_SESSION_EVENTS:   session-events
+      AFFECTRA_TOPIC_SESSION_CONFIG:   session-config
+      AFFECTRA_TOPIC_SESSION_COMMANDS: session-commands
+      AFFECTRA_TOPIC_SESSION_STATUS:   session-status
+      AFFECTRA_TOPIC_SERVICE_HEALTH:   service-health
+      AFFECTRA_RECORDINGS_RETENTION_DAYS: ${RECORDINGS_RETENTION_DAYS:-0}
+      AFFECTRA_UPLOADS_RETENTION_DAYS:    ${UPLOADS_RETENTION_DAYS:-0}
+      AFFECTRA_TOPIC_ANALYTICS:        fused-analytics
+      AFFECTRA_TOPIC_ANNOTATED:        annotated-video
+      AFFECTRA_DB_HOST:                postgres
+      AFFECTRA_DB_PORT:                "5432"
+      AFFECTRA_DB_NAME:                ${DB_NAME:-emotions}
+      AFFECTRA_DB_USER:                ${DB_USER:-app_user}
+      AFFECTRA_DB_PASSWORD:            ${DB_PASSWORD:-basic_app_password}
+    deploy:
+      <<: *restart
+      placement:
+        constraints: [node.labels.affectra.core == true]
+
+  frontend:
+    image: ${REGISTRY:-127.0.0.1:5000}/affectra-frontend:${TAG:-latest}
+    networks: [affectra]
+    ports:
+      - "8080:80"
+      - "8443:443"
+    environment:
+      TLS_HOSTS: ${TLS_HOSTS:-}
+    volumes:
+      - frontend_certs:/etc/nginx/certs
+    deploy:
+      <<: *restart
+      placement:
+        constraints: [node.labels.affectra.core == true]
+
+volumes:
+  kafka_1_data:
+  kafka_2_data:
+  kafka_3_data:
+  postgres_data:
+  s3_data:
+  ingest_cache:
+  archive_spool:
+  frontend_certs:

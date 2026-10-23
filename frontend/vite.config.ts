@@ -31,7 +31,7 @@ export default defineConfig({
         changeOrigin: true,
       },
       '/api/capture': {
-        target: 'ws://localhost:8000',
+        target: 'ws://localhost:8001',
         ws: true,
         changeOrigin: true,
       },

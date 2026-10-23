@@ -26,6 +26,7 @@ from .contracts import AudioAnalytics
 from .recognizer import VoiceEmotionRecognizer
 from .smoothing import VoiceSmoother
 from .vad import EnergyVAD
+from .vad import SileroVAD
 
 _log = logging.getLogger("audio.pipeline")
 
@@ -53,14 +54,15 @@ class AudioPipeline:
     Аудиопайплайн камер.
 
     Аудиопоток лёгкий, поэтому обработка в одном потоке. Без kafka_settings handle_chunk и handle_event
-    вызываются напрямую. Окно без речи по VAD или по предобработке модели публикуется с is_speech=False.
+    вызываются напрямую. Окно сначала проверяет энергетический VAD, прошедшие — speech_vad (Silero), если он задан:
+    модель эмоций запускается только на речи. Окно без речи публикуется с is_speech=False.
     """
 
     def __init__(self, kafka_settings: Optional[Dict], defaults: AudioSettings,
                  session_store: Optional[SessionConfigStore] = None,
                  max_chunk_age_ms: Optional[int] = 2000, num_threads: Optional[int] = None,
                  vad_threshold_dbfs: float = -45.0, sample_rate: int = 16000,
-                 session_idle_timeout_s: float = 30.0):
+                 session_idle_timeout_s: float = 30.0, speech_vad: Optional[SileroVAD] = None):
         missing = [k for k, v in vars(defaults).items() if v is None]
         if missing:
             raise ValueError(f"audio defaults must be fully specified, missing: {missing}")
@@ -70,6 +72,7 @@ class AudioPipeline:
         self.num_threads            = num_threads
         self.session_idle_timeout_s = session_idle_timeout_s
         self.vad                    = EnergyVAD(sample_rate=sample_rate, threshold_dbfs=vad_threshold_dbfs)
+        self.speech_vad             = speech_vad
 
         self._sessions: Dict[str, _Session] = {}
         self._dirty: Set[str] = set()
@@ -78,11 +81,13 @@ class AudioPipeline:
         self._failed: Dict[Tuple[str, str], str] = {}
         self._default_recognizer = self._recognizer(self.defaults)
 
-        self.staleness      = StalenessFilter(max_chunk_age_ms)
+        self.staleness      = StalenessFilter(max_chunk_age_ms, name="audio chunks")
         self.latency        = LatencyWindow()
         self._infer_s       = 0.0
+        self._vad_s         = 0.0
         self._audio_s       = 0.0
         self.windows_total  = 0
+        self.model_windows  = 0
         self.sessions_ended = 0
 
         if session_store is not None:
@@ -196,8 +201,14 @@ class AudioPipeline:
         if not windows:
             return []
 
-        speech   = [self.vad.speech_prob(w.samples) for w in windows]
-        to_model = [i for i, p in enumerate(speech) if p >= sess.settings.vad_threshold]
+        threshold = sess.settings.vad_threshold
+        speech    = [self.vad.speech_prob(w.samples) for w in windows]
+        if self.speech_vad is not None:
+            t0     = time.perf_counter()
+            speech = [self.speech_vad.speech_prob(w.samples) if p >= threshold else p for w, p in zip(windows, speech)]
+            self._vad_s += time.perf_counter() - t0
+        to_model = [i for i, p in enumerate(speech) if p >= threshold]
+        self.model_windows += len(to_model)
         outputs: Dict[int, Optional[Dict[str, Any]]] = {}
         recognizer = self._recognizer(sess.settings)
         if to_model:
@@ -262,6 +273,9 @@ class AudioPipeline:
         """Время инференса к длительности обработанного звука: меньше 1 — успеваем."""
         return self._infer_s / self._audio_s if self._audio_s > 0 else 0.0
 
+    def vad_real_time_factor(self) -> float:
+        return self._vad_s / self._audio_s if self._audio_s > 0 else 0.0
+
     def process(self, log_every_windows: int = 50) -> None:
         if self._kafka is None:
             raise RuntimeError("AudioPipeline created without Kafka settings")
@@ -298,7 +312,8 @@ class AudioPipeline:
                     _log.info(
                         f"Audio: {self.windows_total} windows, sessions={len(self._sessions)}, "
                         f"latency p50={lat['p50']:.0f} p95={lat['p95']:.0f} max={lat['max']:.0f} ms, "
-                        f"RTF={self.real_time_factor():.4f}, dropped stale={dropped} "
+                        f"RTF={self.real_time_factor():.4f}, VAD RTF={self.vad_real_time_factor():.4f}, "
+                        f"to model {self.model_windows}/{self.windows_total}, dropped stale={dropped} "
                         f"(total {self.staleness.dropped})"
                     )
         except KeyboardInterrupt:

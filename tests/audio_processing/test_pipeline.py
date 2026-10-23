@@ -124,3 +124,29 @@ def test_latency_and_rtf_are_measured():
     run(p, chunks(tone(4000)))
     assert len(p.latency) == 3
     assert 0 < p.real_time_factor() < 1
+
+
+class FakeSpeechVAD:
+    def __init__(self, prob):
+        self.prob  = prob
+        self.calls = 0
+
+    def speech_prob(self, samples):
+        self.calls += 1
+        return self.prob
+
+
+def test_speech_vad_gates_model():
+    vad = FakeSpeechVAD(0.0)
+    p   = pipeline(speech_vad=vad)
+    res = run(p, chunks(np.concatenate([tone(3000), silence(3000)])))
+    assert not any(r.is_speech for r in res)
+    assert vad.calls == 3 and p.model_windows == 0
+    assert [r.speech_prob for r in res][:3] == [0.0, 0.0, 0.0]
+
+
+def test_speech_vad_passes_speech():
+    vad = FakeSpeechVAD(0.9)
+    p   = pipeline(speech_vad=vad)
+    res = run(p, chunks(tone(3000)))
+    assert all(r.is_speech for r in res) and p.model_windows == len(res) == vad.calls
