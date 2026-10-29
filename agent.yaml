@@ -1,0 +1,27 @@
+# Настройки агента-аналитика сессий (docs/AGENT.md). Переменные окружения AGENT_* переопределяют значения:
+# AGENT_LLM_BASE_URL, AGENT_LLM_MODEL, AGENT_LLM_API_KEY, AGENT_PRIVACY, AGENT_PROFILE.
+
+llm:
+  # Любой OpenAI-совместимый сервер: Ollama (по умолчанию), llama.cpp, vLLM, внешний API.
+  # ПК с видеокартой в локальной сети: http://<IP ПК>:11434/v1 (на ПК OLLAMA_HOST=0.0.0.0)
+  base_url: http://localhost:11434/v1
+  # Модель семейства Qwen; точное имя выбирается при загрузке по библиотеке Ollama
+  model: qwen3:4b
+  api_key: ollama
+  temperature: 0.2
+  seed: 7
+  max_tokens: 900
+  timeout_s: 180
+  # Без режима «размышлений»: короткие шаги со строгим ответом. Для Qwen — пометка /no_think в сообщениях;
+  # дополнительные поля запроса для конкретного сервера — в extra_body
+  no_think: true
+  extra_body: {}
+
+run:
+  privacy: local            # local — локальная модель; external — внешний API, данные обезличены
+  profile: interview
+  top_k: 10                 # моментов с подробным разбором
+  max_tool_calls: 4         # вызовов ручек на момент, затем обязателен submit_finding
+  max_turns: 8              # предел обменов с моделью на момент
+  time_budget_s: 900        # на весь разбор; оставшиеся моменты — без объяснений
+  output_dir: data/agent_runs

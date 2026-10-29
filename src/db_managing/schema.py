@@ -18,6 +18,8 @@ LEGACY_LABELS: Tuple[str, ...] = (
     "anger", "contempt", "disgust", "fear", "happy", "neutral", "sad", "surprise",
 )
 
+READER_ROLE = "affectra_reader"
+
 MIGRATIONS: List[Tuple[str, str]] = [
     ("001_timeseries_modality", f"""
         ALTER TABLE emotion_timeseries
@@ -62,6 +64,22 @@ MIGRATIONS: List[Tuple[str, str]] = [
         CREATE INDEX IF NOT EXISTS idx_session_recordings_started
             ON session_recordings(started_at DESC);
     """),
+    # Только чтение для MCP-сервера агента: роль видит лишь представления схемы reader
+    ("004_reader_views", f"""
+        CREATE SCHEMA IF NOT EXISTS reader;
+        CREATE OR REPLACE VIEW reader.sessions AS
+            SELECT camera_id, name, kind, status, started_at, finished_at, duration_sec, frames, has_audio,
+                   truncated, video_key, analytics_key, summary
+            FROM session_recordings WHERE status IS NOT NULL;
+        DO $$
+        BEGIN
+            CREATE ROLE {READER_ROLE} NOLOGIN;
+        EXCEPTION WHEN duplicate_object THEN NULL;
+        END $$;
+        ALTER ROLE {READER_ROLE} SET default_transaction_read_only = on;
+        GRANT USAGE ON SCHEMA reader TO {READER_ROLE};
+        GRANT SELECT ON ALL TABLES IN SCHEMA reader TO {READER_ROLE};
+    """),
 ]
 
 RECORDING_STATUSES: Tuple[str, ...] = ("recording", "rendering", "ready", "failed")
@@ -104,6 +122,19 @@ def ensure_schema(conn) -> None:
             cur.execute(sql)
     conn.commit()
     logging.getLogger("db.schema").info(f"DB schema up to date ({len(MIGRATIONS)} migrations)")
+
+
+def enable_reader_login(conn, password: str) -> None:
+    """
+    Вход для роли только на чтение (affectra_reader) с заданным паролем.
+
+    Args:
+        conn           : Соединение psycopg2 с правом менять роли.
+        password (str) : Пароль роли.
+    """
+    with conn.cursor() as cur:
+        cur.execute(f"ALTER ROLE {READER_ROLE} LOGIN PASSWORD %s", (password,))
+    conn.commit()
 
 
 def labels_for(data: Dict[str, Any]) -> Tuple[str, ...]:

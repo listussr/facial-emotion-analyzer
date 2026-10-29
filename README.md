@@ -141,7 +141,8 @@ flowchart LR
 В реальном времени браузер получает исходные кадры (`/api/live`) и аналитику (`/api/events`) и сам
 рисует рамки, совмещая их по времени кадра. Итоговое видео с разметкой собирается уже после сессии.
 
-Подробности по модулям — в [`docs/`](docs/ARCHITECTURE.md), развёртывание — в [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
+Подробности по модулям — в [`docs/`](docs/ARCHITECTURE.md), развёртывание — в [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md),
+проект агента-аналитика сессий — в [docs/AGENT.md](docs/AGENT.md).
 
 ## 4. Модели и качество
 

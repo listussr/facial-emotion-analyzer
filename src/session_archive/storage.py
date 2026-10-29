@@ -16,6 +16,7 @@ def recording_keys(camera_id: str) -> Dict[str, str]:
         camera_id (str): Идентификатор сессии.
 
     Returns:
-        Dict[str, str]: Ключи video и analytics.
+        Dict[str, str]: Ключи video, analytics и series.
     """
-    return {"video": f"sessions/{camera_id}/recording.mp4", "analytics": f"sessions/{camera_id}/analytics.json"}
+    return {"video": f"sessions/{camera_id}/recording.mp4", "analytics": f"sessions/{camera_id}/analytics.json",
+            "series": f"sessions/{camera_id}/series.json"}

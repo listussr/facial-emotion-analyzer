@@ -43,6 +43,8 @@ class Settings:
     DB_NAME: str = os.getenv("AFFECTRA_DB_NAME", "emotions")
     DB_USER: str = os.getenv("AFFECTRA_DB_USER", "app_user")
     DB_PASSWORD: str = os.getenv("AFFECTRA_DB_PASSWORD", "basic_app_password")
+    # Пароль роли affectra_reader (только чтение, для агента); пусто — роль без входа
+    DB_READER_PASSWORD: str = os.getenv("AFFECTRA_DB_READER_PASSWORD", "")
 
 
 settings = Settings()

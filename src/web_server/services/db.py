@@ -33,10 +33,13 @@ def init_pool(minconn: int = 1, maxconn: int = 6) -> None:
     )
     _log.info(f"DB pool ready ({settings.DB_HOST}:{settings.DB_PORT}/{settings.DB_NAME})")
 
+    from src.db_managing import enable_reader_login
     from src.db_managing import ensure_schema
     conn = _pool.getconn()
     try:
         ensure_schema(conn)
+        if settings.DB_READER_PASSWORD:
+            enable_reader_login(conn, settings.DB_READER_PASSWORD)
     finally:
         _pool.putconn(conn)
 

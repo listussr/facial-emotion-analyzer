@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Разбор сессии {{ title }}</title>
+<style>
+  :root { --ink:#0f172a; --muted:#64748b; --line:#e2e8f0; --bg:#f8fafc; --card:#ffffff;
+          --attention:#dc2626; --artifact:#d97706; --insignificant:#64748b; --none:#4f46e5; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:14px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; }
+  main { max-width: 1040px; margin: 0 auto; padding: 24px 16px 48px; }
+  h1 { font-size: 24px; margin: 0 0 4px; } h2 { font-size: 18px; margin: 0 0 12px; } h3 { font-size: 15px; margin: 0; }
+  .muted { color: var(--muted); } .small { font-size: 12px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 18px 20px; margin: 0 0 16px; }
+  .note { border-left: 3px solid var(--none); background:#eef2ff; padding: 8px 12px; border-radius: 8px; font-size: 13px; }
+  .meta { display:flex; flex-wrap:wrap; gap: 6px 18px; font-size: 13px; color: var(--muted); margin: 8px 0 12px; }
+  .chips { display:flex; flex-wrap:wrap; gap: 8px; margin: 10px 0 0; }
+  .chip { display:inline-flex; gap:6px; align-items:center; border:1px solid var(--line); border-radius:999px; padding:2px 10px; font-size:13px; background:#fff; }
+  .v-attention { color: var(--attention); } .v-likely_artifact { color: var(--artifact); }
+  .v-not_significant { color: var(--insignificant); } .v-none { color: var(--none); }
+  .moment { border-top: 1px solid var(--line); padding: 16px 0; break-inside: avoid; }
+  .moment:first-of-type { border-top: 0; padding-top: 4px; }
+  .moment-head { display:flex; flex-wrap:wrap; align-items:baseline; gap: 6px 14px; }
+  .num { font-weight: 700; font-size: 16px; }
+  .grid { display:grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr); gap: 16px; margin-top: 10px; }
+  @media (max-width: 760px) { .grid { grid-template-columns: 1fr; } }
+  dl { margin: 0; } dt { font-weight: 600; margin-top: 8px; } dd { margin: 2px 0 0; }
+  ul { margin: 4px 0 0; padding-left: 18px; }
+  table { width:100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align:left; padding: 6px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; }
+  a { color: #4338ca; } svg { max-width: 100%; height: auto; }
+  code { font-size: 12px; background: #f1f5f9; padding: 1px 4px; border-radius: 4px; }
+  @media print { body { background:#fff; } .card { border: 0; padding: 0; margin-bottom: 20px; } a { color: inherit; } }
+</style>
+</head>
+<body>
+<main>
+
+<section class="card">
+  <h1>Разбор сессии {{ title }}</h1>
+  <div class="meta">
+    {% if started_at %}<span>{{ started_at }}</span>{% endif %}
+    <span>длительность {{ duration }}</span>
+    <span>сценарий: {{ run.profile.title }}</span>
+    <span>модель: {{ run.model or "не использовалась (только детекторы)" }}</span>
+    <span>приватность: {{ "локально" if run.privacy == "local" else "внешний API, обезличено" }}</span>
+    <span>разбор {{ run.run_id }} · {{ created_at }}</span>
+  </div>
+  <p class="note">Первичный контур проверки: отмечены моменты, к которым стоит присмотреться. Оценки — выраженная
+    эмоция по моделям лица и голоса, а не чувства человека. Решение принимает оператор.</p>
+</section>
+
+<section class="card">
+  <h2>Итог</h2>
+  <p><strong>{{ headline }}</strong></p>
+  {% if summary %}<p>{{ summary }}</p>{% endif %}
+  <div class="chips">
+    {% for v in verdict_order %}{% if counts.get(v) %}
+      <span class="chip v-{{ v or 'none' }}">{{ marks[v] }} {{ verdicts[v] }} — {{ counts[v] }}</span>
+    {% endif %}{% endfor %}
+  </div>
+  <p class="small muted">Качество данных: лицо в кадре {{ pct(run.overview.face_present) }} времени, речь
+    {{ pct(run.overview.speech) }}{% if quality %}; {{ quality }}{% endif %}.</p>
+</section>
+
+<section class="card">
+  <h2>Ход сессии</h2>
+  {{ timeline | safe }}
+  <p class="small muted">Линии — вероятности эмоций (итог по лицу и голосу) по секундам. Номера над графиком — моменты,
+    цвет — вердикт. Ниже — доля кадров с лицом и с речью: провалы рядом с моментом часто означают артефакт.</p>
+</section>
+
+<section class="card">
+  <h2>Моменты, требующие внимания</h2>
+  {% if not cards %}<p class="muted">По правилам профиля моментов не найдено.</p>{% endif %}
+  {% for c in cards %}
+  <article class="moment" id="{{ c.id }}">
+    <div class="moment-head">
+      <span class="num v-{{ c.verdict or 'none' }}">{{ c.number }}</span>
+      <h3>{{ c.interval }} · {{ c.titles }}</h3>
+      <span class="chip v-{{ c.verdict or 'none' }}">{{ marks[c.verdict] }} {{ verdicts[c.verdict] }}{% if c.confidence %}, уверенность {{ c.confidence }}{% endif %}</span>
+    </div>
+    <p class="small muted">значимость: детекторы — {{ c.level }} ({{ "%.2f"|format(c.significance) }}){% if c.llm_level %}, модель — {{ c.llm_level }}{% endif %} · длительность {{ c.duration }}</p>
+    <div class="grid">
+      <div>
+        <dl>
+          {% if c.summary %}<dt>Суть</dt><dd>{{ c.summary }}</dd>{% endif %}
+          {% if c.explanation %}<dt>Почему</dt><dd>{{ c.explanation }}</dd>{% endif %}
+          {% if c.evidence %}<dt>Доказательства</dt><dd><ul>{% for e in c.evidence %}<li>{{ e.fact }}{% if e.source %} <span class="muted small">({{ e.source }})</span>{% endif %}</li>{% endfor %}</ul></dd>{% endif %}
+          {% if not c.summary %}<dt>Данные детекторов</dt><dd><ul>{% for line in c.detector_lines %}<li>{{ line }}</li>{% endfor %}</ul>
+            <span class="small muted">Без объяснения модели.</span></dd>{% endif %}
+          {% if c.operator_check %}<dt>Что проверить</dt><dd>{{ c.operator_check }}</dd>{% endif %}
+        </dl>
+        {% if c.link %}<p><a href="{{ c.link }}">▶ открыть запись на {{ c.start }}</a></p>{% endif %}
+      </div>
+      <div>{{ c.chart | safe }}</div>
+    </div>
+  </article>
+  {% endfor %}
+</section>
+
+{% if rest %}
+<section class="card">
+  <h2>Остальные кандидаты</h2>
+  <table>
+    <tr><th>№</th><th>Интервал</th><th>Тип</th><th>Значимость</th><th>Вердикт</th></tr>
+    {% for r in rest %}
+    <tr><td>{{ r.number }}</td><td>{% if r.link %}<a href="{{ r.link }}">{{ r.interval }}</a>{% else %}{{ r.interval }}{% endif %}</td>
+      <td>{{ r.titles }}</td><td>{{ r.level }} ({{ "%.2f"|format(r.significance) }})</td>
+      <td class="v-{{ r.verdict or 'none' }}">{{ marks[r.verdict] }} {{ verdicts[r.verdict] }}</td></tr>
+    {% endfor %}
+  </table>
+</section>
+{% endif %}
+
+<section class="card">
+  <h2>Методика</h2>
+  <p>Моменты находят детерминированные детекторы на секундном ряде вероятностей эмоций субъекта; пересекающиеся
+    кандидаты сливаются в один момент. Значимость = вес типа × интенсивность × уверенность данных × множитель
+    длительности. {% if run.model %}Модель {{ run.model }} оценивает каждого кандидата по контексту и пишет объяснение,
+    но не ищет новых моментов.{% else %}Модель в этом разборе не использовалась.{% endif %}</p>
+  <table>
+    <tr><th>Тип</th><th>Правило</th><th>Параметры профиля «{{ run.profile.name }}»</th></tr>
+    {% for d in detectors %}<tr><td>{{ d.title }}</td><td>{{ d.rule }}</td><td><code>{{ d.params }}</code></td></tr>{% endfor %}
+  </table>
+  <p class="small muted">Модели распознавания: лицо — Swin-T по окну кадров, голос — WavLM-Base+, слияние лица и голоса;
+    обучены на CREMA-D (6 классов, актёрская речь). Расстояние между распределениями — Дженсена — Шеннона по основанию 2.</p>
+  <p class="small muted">Файлы разбора: <a href="findings.json">findings.json</a>{% if run.model %}, <a href="trace.jsonl">trace.jsonl</a>{% endif %}.</p>
+</section>
+
+</main>
+</body>
+</html>

@@ -2,7 +2,7 @@
 
 Каждый файл описывает один модуль: назначение, состав, публичный API, поток данных и неочевидные места.
 Общая карта кода — [`CODE_OVERVIEW.md`](../CODE_OVERVIEW.md), архитектура — [`ARCHITECTURE.md`](../ARCHITECTURE.md),
-развёртывание — [`DEPLOYMENT.md`](../DEPLOYMENT.md).
+развёртывание — [`DEPLOYMENT.md`](../DEPLOYMENT.md), проект агента-аналитика — [`AGENT.md`](../AGENT.md).
 
 | Документ | Модуль | Роль |
 |---|---|---|
@@ -17,6 +17,9 @@
 | [audio_processing.md](audio_processing.md) | `src/audio_processing/` | Окна звука, VAD (энергия и Silero), эмоции голоса |
 | [fusion.md](fusion.md) | `src/fusion/` | Слияние лица и голоса, запись слитых таймсерий |
 | [session_config.md](session_config.md) | `src/session_config/` | Настройки сессий в топике `session-config` |
+| [emotion_moments.md](emotion_moments.md) | `src/emotion_moments/` | Агент: секундный ряд, детекторы моментов, профили сценариев |
+| [affectra_mcp.md](affectra_mcp.md) | `src/affectra_mcp/`, `mcp_server.py` | Агент: MCP-сервер с ручками только на чтение |
+| [agent.md](agent.md) | `src/agent/` | Агент: подготовка разбора, вердикты, HTML-отчёт |
 | [service_health.md](service_health.md) | `src/service_health/` | Сигналы живости сервисов и запуск анализа только после загрузки моделей |
 | [session_archive.md](session_archive.md) | `src/session_archive/` | Итоговая запись сессии: спул, рендер, S3 |
 | [emotion_kit.md](emotion_kit.md) | `src/emotion_kit/` | Инференс моделей CREMA-D и методы слияния |

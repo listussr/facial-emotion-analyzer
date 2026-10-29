@@ -8,6 +8,7 @@ src/session_archive/
 ├── service.py  ArchiveService: Kafka, спулы сессий, ожидание аналитики, фоновый рендер
 ├── spool.py    SessionSpool: кадры, звук и аналитика сессии на диске
 ├── render.py   render_recording (mp4), build_analytics_document (JSON)
+├── series.py   build_series: секундный ряд субъекта (series.json) для агента-аналитика
 └── storage.py  recording_keys; клиент S3 — общий src/object_storage.py
 ```
 
@@ -76,12 +77,42 @@ stateDiagram-v2
 `summary` сохраняется и в `session_recordings.summary` — интерфейс показывает распределения без загрузки
 JSON.
 
+### Секундный ряд (`series.json`)
+
+Рядом с `analytics.json` архиватор пишет `series.json`: компактный ряд эмоций **субъекта** с шагом 1 с для
+агента-аналитика ([emotion_moments.md](emotion_moments.md)). Час записи занимает сотни КБ, а не десятки МБ.
+
+- **Субъект** («одна камера — один человек»).
+  - Ключ человека — трек. Его личность — последний постоянный `face_id`; временные `pending-*` до узнавания не
+    считаются.
+  - Основа — человек с наибольшим числом кадров.
+  - К нему добавляются люди, почти не пересекающиеся с ним по времени (вышел и вернулся с новым треком), кроме
+    узнанных как другой человек.
+- **По каждой секунде:**
+  - средние вероятности субъекта — `fused`, `face`, `voice` (`null` — нет данных);
+  - доли кадров: `face_present` (лицо субъекта), `predicted` (рамка от трекера), `others` (другие люди) и
+    `speech` (речь).
+  
+  В `compact_analytics` для этого сохраняются `speaking` и `speech_prob` голоса. У старых записей вместо них
+  берётся «голос оценён».
+- **Старые записи.** Для записей, сделанных до появления `series.json`, его собирает
+  `scripts/build_series.py` (`--force` — пересобрать все).
+
 ## Хранилище ([storage.py](../../src/session_archive/storage.py))
 
 Клиент — общий `S3Storage` из `src/object_storage.py` (см. [common.md](common.md#srcobject_storagepy--объектное-хранилище)). Настройки — `S3_ENDPOINT`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`,
 `S3_BUCKET`, `S3_REGION`. Адресация path-style, подпись s3v4: так работает любое S3-совместимое хранилище.
 
-Ключи — `recording_keys(camera_id)`: `sessions/<id>/recording.mp4` и `sessions/<id>/analytics.json`.
+Ключи — `recording_keys(camera_id)`: `sessions/<id>/recording.mp4`, `sessions/<id>/analytics.json` и
+`sessions/<id>/series.json`.
+
+**Ключи доступа.** SeaweedFS запускается скриптом `deploy/seaweedfs/s3-start.sh` с тремя ключами:
+- `admin` — сервисы системы;
+- `reader` — только чтение бакета записей, для MCP-сервера агента;
+- `agent` — только свой бакет `affectra-agent-reports`, его скрипт создаёт при старте.
+
+Тома SeaweedFS — по 1 ГБ, до 100 штук: у каждого бакета свои тома, и при настройках по умолчанию их не хватало
+уже на второй бакет.
 
 В docker-compose хранилище — SeaweedFS (`chrislusf/seaweedfs`, Apache 2.0) с S3 API на порту 8333: образы MinIO
 с 2025 года не публикуются.

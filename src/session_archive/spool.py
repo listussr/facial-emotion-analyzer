@@ -33,7 +33,8 @@ def compact_analytics(message: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "pts_ms": message.get("pts_ms"),
         "faces": faces,
-        "voice": {"label": voice.get("label"), "scores": voice.get("scores")} if voice else None,
+        "voice": {"label": voice.get("label"), "scores": voice.get("scores"), "speaking": voice.get("speaking"),
+                  "speech_prob": voice.get("speech_prob")} if voice else None,
     }
 
 

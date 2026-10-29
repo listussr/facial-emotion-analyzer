@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Link, useNavigate, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { api } from '@/api/client';
 import EmotionBars from '@/components/EmotionBars';
 import { EMOTION_RU, RecordingInfo, RecordingStatus } from '@/types';
@@ -138,6 +138,9 @@ function DominantLine({ counts }: { counts: Record<string, number> }) {
 
 function RecordingView({ rec, onDelete }: { rec: RecordingInfo; onDelete: () => void }) {
   const ready = rec.status === 'ready';
+  // ?t=секунды — ссылка на момент записи (например, из разбора агента)
+  const [params] = useSearchParams();
+  const start = Number(params.get('t'));
   const tracks = Object.entries(rec.summary?.tracks || {});
   return (
     <section className="glass p-6 mb-6">
@@ -176,6 +179,9 @@ function RecordingView({ rec, onDelete }: { rec: RecordingInfo; onDelete: () => 
           src={api.recordingVideoUrl(rec.session_id)}
           controls
           preload="metadata"
+          onLoadedMetadata={(e) => {
+            if (Number.isFinite(start) && start > 0) e.currentTarget.currentTime = start;
+          }}
         />
       ) : rec.status === 'failed' ? (
         <p className="text-sm text-red-700">Не удалось собрать запись: {rec.error || 'неизвестная ошибка'}</p>

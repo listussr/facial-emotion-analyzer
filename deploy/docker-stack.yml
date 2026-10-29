@@ -70,6 +70,10 @@ x-kafka-env: &kafka-env
   KAFKA_HEAP_OPTS: ${KAFKA_HEAP_OPTS:--Xms512m -Xmx1g}
   KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
 
+configs:
+  s3_start:
+    file: ./seaweedfs/s3-start.sh
+
 networks:
   affectra:
     driver: overlay
@@ -175,10 +179,20 @@ services:
   s3:
     image: chrislusf/seaweedfs:4.48
     networks: [affectra]
-    command: ["server", "-dir=/data", "-s3", "-s3.port=8333"]
+    # Ключи: admin — сервисы системы, reader — агент (только чтение записей), agent — бакет отчётов агента
+    entrypoint: ["/bin/sh", "/s3-start.sh"]
+    configs:
+      - source: s3_start
+        target: /s3-start.sh
     environment:
-      AWS_ACCESS_KEY_ID:     ${S3_ACCESS_KEY:-affectra}
-      AWS_SECRET_ACCESS_KEY: ${S3_SECRET_KEY:-affectra-secret}
+      S3_ACCESS_KEY:        ${S3_ACCESS_KEY:-affectra}
+      S3_SECRET_KEY:        ${S3_SECRET_KEY:-affectra-secret}
+      S3_BUCKET:            ${S3_BUCKET:-affectra-recordings}
+      S3_READER_ACCESS_KEY: ${S3_READER_ACCESS_KEY:-affectra-reader}
+      S3_READER_SECRET_KEY: ${S3_READER_SECRET_KEY:-affectra-reader-secret}
+      S3_AGENT_ACCESS_KEY:  ${S3_AGENT_ACCESS_KEY:-affectra-agent}
+      S3_AGENT_SECRET_KEY:  ${S3_AGENT_SECRET_KEY:-affectra-agent-secret}
+      S3_AGENT_BUCKET:      ${S3_AGENT_BUCKET:-affectra-agent-reports}
     volumes:
       - s3_data:/data
     deploy:
@@ -334,6 +348,7 @@ services:
       AFFECTRA_DB_NAME:                ${DB_NAME:-emotions}
       AFFECTRA_DB_USER:                ${DB_USER:-app_user}
       AFFECTRA_DB_PASSWORD:            ${DB_PASSWORD:-basic_app_password}
+      AFFECTRA_DB_READER_PASSWORD:     ${DB_READER_PASSWORD:-affectra-reader-secret}
     deploy:
       <<: *restart
       placement:

@@ -19,6 +19,7 @@ from typing import Optional
 
 from .render import build_analytics_document
 from .render import render_recording
+from .series import build_series_from_document
 from .spool import SessionSpool
 from .storage import recording_keys
 
@@ -171,14 +172,18 @@ class ArchiveService:
         self._record(camera_id, status="rendering", finished_at=_utc(spool.ended_at or spool.last_seen))
         try:
             with tempfile.TemporaryDirectory(dir=self.spool_root) as tmp:
-                video_path = Path(tmp) / "recording.mp4"
-                result     = render_recording(spool, video_path, threads=self.render_threads)
-                document   = build_analytics_document(spool, result, session=spool.start_event)
-                json_path  = Path(tmp) / "analytics.json"
+                video_path  = Path(tmp) / "recording.mp4"
+                result      = render_recording(spool, video_path, threads=self.render_threads)
+                document    = build_analytics_document(spool, result, session=spool.start_event)
+                json_path   = Path(tmp) / "analytics.json"
                 json_path.write_text(json.dumps(document, ensure_ascii=False, default=str), encoding="utf-8")
+                series_path = Path(tmp) / "series.json"
+                series_path.write_text(json.dumps(build_series_from_document(document), ensure_ascii=False),
+                                       encoding="utf-8")
 
                 self.storage.upload_file(video_path, keys["video"], "video/mp4")
                 self.storage.upload_file(json_path, keys["analytics"], "application/json")
+                self.storage.upload_file(series_path, keys["series"], "application/json")
             self._record(camera_id, status="ready", video_key=keys["video"], analytics_key=keys["analytics"],
                          frames=result.frames, duration_sec=result.duration_sec, size_bytes=result.size_bytes,
                          has_audio=result.has_audio, truncated=spool.truncated, summary=document["summary"],

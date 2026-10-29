@@ -118,6 +118,8 @@ sequenceDiagram
 `AFFECTRA_KAFKA`, `AFFECTRA_TOPIC_*` (в том числе `SESSION_COMMANDS`, `SESSION_STATUS` и `SERVICE_HEALTH`),
 `AFFECTRA_REQUIRE_READY` (проверка готовности сервисов перед стартом, по умолчанию включена),
 `AFFECTRA_RECORDINGS_RETENTION_DAYS` и `AFFECTRA_UPLOADS_RETENTION_DAYS` (0 — хранить всегда), `AFFECTRA_DB_*`,
+`AFFECTRA_DB_READER_PASSWORD` (при старте включает вход роли `affectra_reader` только на чтение — для агента,
+см. [affectra_mcp.md](affectra_mcp.md#права-только-на-чтение)),
 временный каталог загрузок `data/uploads`, параметры продюсера для новых сессий (854 × 480, качество JPEG 60),
 предел загрузки 2048 МБ, CORS для dev-сервера. Клиент S3 читает `S3_*`.
 
